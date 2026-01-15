@@ -42,7 +42,7 @@ except json.JSONDecodeError as e:
     logger.error(f"Invalid JSON in config file: {e}")
     raise
 
-STREAM_INTERVAL = int(CONFIG.get("streamIntervalSeconds", 1))
+STREAM_INTERVAL = float(CONFIG.get("streamIntervalSeconds", 1))
 MAJORS = CONFIG.get("majors", [])
 
 # Initialize alert manager and email service

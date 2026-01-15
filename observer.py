@@ -38,6 +38,12 @@ class SiteObserver:
             self.browser = await self._pw.chromium.launch(headless=True)
             context = await self.browser.new_context()
             self.page = await context.new_page()
+            # Block non-essential resources to reduce latency
+            await self.page.route("**/*", lambda route: (
+                route.abort()
+                if route.request.resource_type in {"image", "font", "media", "stylesheet"}
+                else route.continue_()
+            ))
             await self.page.goto(self.url)
             await self.page.wait_for_selector(self.wait_selector, timeout=30000)
             logger.info("Browser started successfully")
