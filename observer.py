@@ -42,19 +42,22 @@ class SiteObserver:
             await self.page.wait_for_selector(self.wait_selector, timeout=30000)
             logger.info("Browser started successfully")
 
-        if self.inject_mutation_observer:
-            await self.page.evaluate(
-                """
-                () => {
-                    window.__changes = [];
-                    const observer = new MutationObserver(mutations => {
-                        mutations.forEach(m => window.__changes.push(m.type));
-                    });
-                    observer.observe(document.body, { childList: true, subtree: true });
-                    window.__observer = observer;
-                }
-                """
-            )
+            if self.inject_mutation_observer:
+                await self.page.evaluate(
+                    """
+                    () => {
+                        window.__changes = [];
+                        const observer = new MutationObserver(mutations => {
+                            mutations.forEach(m => window.__changes.push(m.type));
+                        });
+                        observer.observe(document.body, { childList: true, subtree: true });
+                        window.__observer = observer;
+                    }
+                    """
+                )
+        except Exception as e:
+            logger.error(f"Failed to start browser: {e}")
+            raise
 
     async def shutdown(self) -> None:
         """Clean up browser resources."""
