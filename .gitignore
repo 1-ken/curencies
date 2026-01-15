@@ -50,6 +50,9 @@ logs/
 .env
 .env.local
 
+# Alerts database
+alerts.json
+
 # Windows
 Thumbs.db
 ehthumbs.db

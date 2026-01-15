@@ -147,7 +147,7 @@ class SiteObserver:
             "pairs": major_pairs,
             "pairsSample": texts[:10],
             "changes": changes,
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": datetime.now().isoformat(),
         }
 
 

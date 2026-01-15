@@ -3,6 +3,7 @@
 ## Prerequisites
 - Python 3.13 installed
 - Port 8000 available
+- SendGrid account with a verified sender email
 
 ## Installation
 
@@ -26,12 +27,23 @@ pip install -r requirements.txt
 playwright install chromium
 ```
 
+4. **Environment variables (.env):**
+```
+SENDGRID_API_KEY=your-sendgrid-api-key
+FROM_EMAIL=verified-sender@example.com
+```
+
 ## Configuration
 
 Edit `config.json` to customize:
 - `url`: Target website to scrape
 - `streamIntervalSeconds`: Data refresh rate (default: 1)
 - `majors`: Currency codes to monitor
+
+Other runtime settings:
+- Alerts persist in `alerts.json` (JSON store in project root)
+- Email alerts use SendGrid with `FROM_EMAIL` as the sender
+- "Equal" alerts use a tolerance of ±0.0001 (1 pip) for price matching
 
 ## Running
 
@@ -40,8 +52,25 @@ Edit `config.json` to customize:
 python run_uvicorn.py
 ```
 
-**Production (with systemd):**
+**Production (example systemd):**
+```
+[Unit]
+Description=Finance Observer
+After=network.target
+
+[Service]
+WorkingDirectory=/path/to/app
+Environment="PATH=/path/to/app/.venv313/bin"
+ExecStart=/path/to/app/.venv313/bin/python run_uvicorn.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+```
+Then:
 ```bash
+sudo systemctl daemon-reload
+sudo systemctl enable finance-observer
 sudo systemctl start finance-observer
 ```
 
@@ -57,6 +86,8 @@ Logs are output to stdout. Redirect to file:
 ```bash
 python run_uvicorn.py > app.log 2>&1
 ```
+
+Alert data: `alerts.json` (safe to back up). Delete to start fresh (alerts will be lost).
 
 ## Security Notes
 

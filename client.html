@@ -3,62 +3,242 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Finance Observer Client</title>
+    <title>Finance Observer - Live Forex with Alerts</title>
     <style>
-      body { font-family: system-ui, Arial, sans-serif; margin: 2rem; }
-      .pill { display: inline-block; padding: 4px 8px; margin: 4px; border-radius: 12px; background: #eef; }
-      pre { background: #f7f7f7; padding: 12px; border-radius: 6px; overflow-x: auto; }
+      * { box-sizing: border-box; }
+      body { font-family: system-ui, Arial, sans-serif; margin: 0; padding: 2rem; background: #f5f5f5; }
+      .container { max-width: 1200px; margin: 0 auto; }
+      h1 { color: #333; border-bottom: 3px solid #007bff; padding-bottom: 10px; }
+      h2 { color: #555; margin-top: 2rem; }
+      .pill { display: inline-block; padding: 6px 12px; margin: 4px; border-radius: 20px; background: #e3f2fd; color: #0066cc; font-weight: bold; }
+      table { border-collapse: collapse; width: 100%; background: white; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+      th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
+      th { background: #007bff; color: white; font-weight: bold; }
+      tr:hover { background: #f9f9f9; }
+      .alert-form { background: white; padding: 20px; border-radius: 8px; margin: 1rem 0; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+      .form-group { margin-bottom: 12px; }
+      label { display: block; font-weight: bold; margin-bottom: 4px; }
+      input, select { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
+      button { background: #28a745; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; }
+      button:hover { background: #218838; }
+      button.danger { background: #dc3545; }
+      button.danger:hover { background: #c82333; }
+      .status-active { color: #28a745; font-weight: bold; }
+      .status-triggered { color: #dc3545; font-weight: bold; }
+      .alert-item { background: white; padding: 15px; margin: 10px 0; border-left: 4px solid #007bff; border-radius: 4px; }
+      .alert-item.triggered { border-left-color: #dc3545; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(500px, 1fr)); gap: 20px; }
+      pre { background: #f7f7f7; padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 12px; }
     </style>
   </head>
   <body>
-    <h1>Live Majors</h1>
-    <div id="majors"></div>
+    <div class="container">
+      <h1>💱 Finance Observer - Live Forex with Price Alerts</h1>
+      
+      <h2>Live Majors</h2>
+      <div id="majors"></div>
 
-    <h2>Currency Pairs with Prices</h2>
-    <table id="pairsTable" style="border-collapse: collapse; width: 100%; max-width: 600px;">
-      <thead>
-        <tr style="background: #333; color: white;">
-          <th style="padding: 8px; text-align: left;">Pair</th>
-          <th style="padding: 8px; text-align: right;">Price</th>
-        </tr>
-      </thead>
-      <tbody id="pairsBody"></tbody>
-    </table>
+      <h2>Create Price Alert</h2>
+      <div class="alert-form">
+        <form id="alertForm" onsubmit="createAlert(event)">
+          <div class="grid">
+            <div>
+              <div class="form-group">
+                <label>Currency Pair:</label>
+                <select id="alertPair" required>
+                  <option value="">Select a currency pair...</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Target Price:</label>
+                <input type="text" id="alertPrice" pattern="[0-9]+\.?[0-9]*" placeholder="e.g., 1.16300" required />
+              </div>
+            </div>
+            <div>
+              <div class="form-group">
+                <label>Condition:</label>
+                <select id="alertCondition" required>
+                  <option value="equal">Price EQUALS</option>
+                  <option value="above">Price goes ABOVE</option>
+                  <option value="below">Price goes BELOW</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Email Address:</label>
+                <input type="email" id="alertEmail" placeholder="your@email.com" required />
+              </div>
+              <div class="form-group">
+                <label>Custom Message (Optional):</label>
+                <textarea id="alertMessage" placeholder="Add a custom message for the alert email..." style="resize: vertical; min-height: 60px;"></textarea>
+              </div>
+            </div>
+          </div>
+          <button type="submit">🔔 Create Alert</button>
+        </form>
+      </div>
 
-    <h2>Pairs Sample</h2>
-    <pre id="pairs"></pre>
+      <div class="grid">
+        <div>
+          <h2>Active Alerts</h2>
+          <div id="activeAlerts"></div>
+        </div>
+        <div>
+          <h2>Triggered Alerts</h2>
+          <div id="triggeredAlerts"></div>
+        </div>
+      </div>
 
-    <h2>Mutation Changes</h2>
-    <pre id="changes"></pre>
+      <h2>Currency Pairs with Prices</h2>
+      <table id="pairsTable">
+        <thead>
+          <tr>
+            <th>Pair</th>
+            <th style="text-align: right;">Price</th>
+          </tr>
+        </thead>
+        <tbody id="pairsBody"></tbody>
+      </table>
+    </div>
 
     <script>
       const majorsNode = document.getElementById('majors');
       const pairsBody = document.getElementById('pairsBody');
-      const pairsNode = document.getElementById('pairs');
-      const changesNode = document.getElementById('changes');
+      const activeAlertsNode = document.getElementById('activeAlerts');
+      const triggeredAlertsNode = document.getElementById('triggeredAlerts');
+      const alertPairSelect = document.getElementById('alertPair');
+      const triggeredState = { list: [], visible: 5 };
 
       const ws = new WebSocket('ws://localhost:8000/ws/observe');
-      ws.onopen = () => console.log('Connected');
+      ws.onopen = () => console.log('Connected to server');
       ws.onerror = (e) => console.error('WebSocket error', e);
-      ws.onclose = () => console.log('Disconnected');
+      ws.onclose = () => console.log('Disconnected from server');
 
       ws.onmessage = (evt) => {
         const data = JSON.parse(evt.data);
         const majors = data.majors || [];
         majorsNode.innerHTML = majors.map(m => `<span class="pill">${m}</span>`).join('');
         
-        // Display pairs with prices in table
+        // Display pairs with prices
         const pairs = data.pairs || [];
+        
+        // Update the currency pair dropdown with available pairs
+        const currentValue = alertPairSelect.value;
+        alertPairSelect.innerHTML = '<option value="">Select a currency pair...</option>' + 
+          pairs.map(p => `<option value="${p.pair}">${p.pair} (${p.price})</option>`).join('');
+        if (currentValue) alertPairSelect.value = currentValue;
         pairsBody.innerHTML = pairs.map(p => `
-          <tr style="border-bottom: 1px solid #ddd;">
-            <td style="padding: 8px;">${p.pair}</td>
-            <td style="padding: 8px; text-align: right; font-weight: bold;">${p.price}</td>
+          <tr>
+            <td>${p.pair}</td>
+            <td style="text-align: right; font-weight: bold;">${p.price}</td>
           </tr>
         `).join('');
-        
-        pairsNode.textContent = JSON.stringify(data.pairsSample || [], null, 2);
-        changesNode.textContent = JSON.stringify(data.changes || [], null, 2);
+
+        // Display active alerts
+        const alerts = data.alerts || {};
+        const activeAlerts = alerts.active || [];
+        activeAlertsNode.innerHTML = activeAlerts.length === 0 ? '<p style="color: #999;">No active alerts</p>' : activeAlerts.map(a => `
+          <div class="alert-item">
+            <div><strong style="font-size: 1.1em;">${a.pair}</strong></div>
+            <div style="margin: 8px 0; font-size: 0.95em;">Alert when price <strong>${a.condition}</strong> <strong style="color: #007bff;">${a.target_price}</strong></div>
+            <div style="font-size: 0.85em; color: #666; margin-bottom: 10px;">📧 ${a.email}</div>
+            ${a.custom_message ? `<div style="background-color: #fff3cd; border-left: 3px solid #ffc107; padding: 8px; margin: 8px 0; font-size: 0.9em; border-radius: 3px;"><strong>Message:</strong> ${a.custom_message}</div>` : ''}
+            <div style="margin-top: 10px;">
+              <button class="danger" onclick="deleteAlert('${a.id}')" style="width: 100%; padding: 8px;">Delete Alert</button>
+            </div>
+          </div>
+        `).join('');
+
+        // Store triggered alerts and render with pagination (load more)
+        triggeredState.list = (alerts.triggered || []).sort((a, b) => new Date(b.triggered_at) - new Date(a.triggered_at));
+        if (triggeredState.visible < 5) triggeredState.visible = 5;
+        renderTriggeredAlerts();
       };
+
+      function renderTriggeredAlerts() {
+        const { list, visible } = triggeredState;
+        if (!list || list.length === 0) {
+          triggeredAlertsNode.innerHTML = '<p style="color: #999;">No triggered alerts</p>';
+          return;
+        }
+
+        const slice = list.slice(0, visible);
+        const cards = slice.map(a => `
+          <div class="alert-item triggered">
+            <div><strong style="font-size: 1.1em;">${a.pair}</strong> <span class="status-triggered">✓ TRIGGERED</span></div>
+            <div style="margin: 8px 0; font-size: 0.95em;">Price reached <strong>${a.condition}</strong> <strong style="color: #007bff;">${a.target_price}</strong></div>
+            <div style="font-size: 0.9em; color: #666;">Current: <strong>${a.last_checked_price}</strong></div>
+            ${a.custom_message ? `<div style="background-color: #fff3cd; border-left: 3px solid #ffc107; padding: 8px; margin: 8px 0; font-size: 0.85em; border-radius: 3px;"><strong>Message:</strong> ${a.custom_message}</div>` : ''}
+            <div style="font-size: 0.8em; color: #999;">Triggered: ${new Date(a.triggered_at).toLocaleString()}</div>
+          </div>
+        `).join('');
+
+        const hasMore = list.length > visible;
+        const loadMoreBtn = hasMore ? `
+          <div style="margin-top: 10px; text-align: center;">
+            <button onclick="loadMoreTriggered()" style="width: 100%; background: #007bff; color: white; padding: 10px; border: none; border-radius: 4px;">Load more triggered alerts (${list.length - visible} more)</button>
+          </div>
+        ` : '';
+
+        triggeredAlertsNode.innerHTML = cards + loadMoreBtn;
+      }
+
+      function loadMoreTriggered() {
+        triggeredState.visible = Math.min(triggeredState.visible + 5, triggeredState.list.length);
+        renderTriggeredAlerts();
+      }
+
+      async function createAlert(event) {
+        event.preventDefault();
+        
+        const pair = document.getElementById('alertPair').value;
+        const targetPriceInput = document.getElementById('alertPrice').value;
+        const targetPrice = parseFloat(targetPriceInput);
+        
+        // Validate price input
+        if (isNaN(targetPrice) || targetPrice <= 0) {
+          alert('Please enter a valid price');
+          return;
+        }
+        
+        const condition = document.getElementById('alertCondition').value;
+        const email = document.getElementById('alertEmail').value;
+        const customMessage = document.getElementById('alertMessage').value || '';
+
+        try {
+          const response = await fetch('/api/alerts', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pair, target_price: targetPrice, condition, email, custom_message: customMessage })
+          });
+          
+          if (response.ok) {
+            alert('✅ Alert created successfully!');
+            document.getElementById('alertForm').reset();
+          } else {
+            alert('❌ Failed to create alert');
+          }
+        } catch (error) {
+          alert(`Error: ${error.message}`);
+        }
+      }
+
+      async function deleteAlert(alertId) {
+        if (!confirm('Delete this alert?')) return;
+        
+        try {
+          const response = await fetch(`/api/alerts/${alertId}`, {
+            method: 'DELETE'
+          });
+          
+          if (response.ok) {
+            alert('Alert deleted');
+          } else {
+            alert('Failed to delete alert');
+          }
+        } catch (error) {
+          alert(`Error: ${error.message}`);
+        }
+      }
     </script>
   </body>
 </html>
