@@ -14,7 +14,7 @@ CONFIG_PATH = os.path.join(HERE, "config.json")
 with open(CONFIG_PATH, "r", encoding="utf-8") as f:
     CONFIG: Dict[str, Any] = json.load(f)
 
-STREAM_INTERVAL = int(CONFIG.get("streamIntervalSeconds", 2))
+STREAM_INTERVAL = int(CONFIG.get("streamIntervalSeconds", 1))
 MAJORS = CONFIG.get("majors", [])
 
 app = FastAPI(title="Finance Observer")

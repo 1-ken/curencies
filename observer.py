@@ -71,6 +71,31 @@ class SiteObserver:
         texts: List[str] = await self.page.evaluate(js)
         return texts
 
+    async def _extract_pairs_with_prices(self) -> List[Dict[str, str]]:
+        """Extract currency pairs with their current prices from the table."""
+        if not self.page:
+            return []
+        js = f"""
+        (() => {{
+            const table = document.querySelector('{self.table_selector}');
+            if (!table) return [];
+            const rows = table.querySelectorAll('tbody tr');
+            return Array.from(rows).map(row => {{
+                const cells = row.querySelectorAll('td');
+                if (cells.length < 4) return null;
+                const priceText = cells[3]?.textContent.trim() || '';
+                // Extract just the price (first number before any +/- change)
+                const priceMatch = priceText.match(/^([\\d,\\.]+)/);
+                return {{
+                    pair: cells[1]?.textContent.trim() || '',
+                    price: priceMatch ? priceMatch[1] : priceText
+                }};
+            }}).filter(item => item && item.pair && item.price);
+        }})()
+        """
+        pairs_data: List[Dict[str, str]] = await self.page.evaluate(js)
+        return pairs_data
+
     @staticmethod
     def _parse_majors_from_texts(texts: List[str], majors: List[str]) -> List[str]:
         majors_set = set(m.upper() for m in majors)
@@ -87,13 +112,22 @@ class SiteObserver:
         if not self.page:
             raise RuntimeError("Observer not started. Call startup() first.")
 
-        texts = await self._extract_pair_cells_text()
+        pairs_with_prices = await self._extract_pairs_with_prices()
+        texts = [item["pair"] for item in pairs_with_prices]
         majors_found = self._parse_majors_from_texts(texts, majors)
+        
+        # Filter pairs to only include those with majors
+        major_pairs = [
+            item for item in pairs_with_prices
+            if any(m.upper() in item["pair"].upper() for m in majors)
+        ]
+        
         title = await self.page.title()
         changes: List[str] = await self.page.evaluate("() => (window.__changes || []).splice(0)")
         return {
             "title": title,
             "majors": majors_found,
+            "pairs": major_pairs,
             "pairsSample": texts[:10],
             "changes": changes,
             "ts": datetime.now(timezone.utc).isoformat(),

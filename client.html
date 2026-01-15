@@ -14,6 +14,17 @@
     <h1>Live Majors</h1>
     <div id="majors"></div>
 
+    <h2>Currency Pairs with Prices</h2>
+    <table id="pairsTable" style="border-collapse: collapse; width: 100%; max-width: 600px;">
+      <thead>
+        <tr style="background: #333; color: white;">
+          <th style="padding: 8px; text-align: left;">Pair</th>
+          <th style="padding: 8px; text-align: right;">Price</th>
+        </tr>
+      </thead>
+      <tbody id="pairsBody"></tbody>
+    </table>
+
     <h2>Pairs Sample</h2>
     <pre id="pairs"></pre>
 
@@ -22,6 +33,7 @@
 
     <script>
       const majorsNode = document.getElementById('majors');
+      const pairsBody = document.getElementById('pairsBody');
       const pairsNode = document.getElementById('pairs');
       const changesNode = document.getElementById('changes');
 
@@ -34,6 +46,16 @@
         const data = JSON.parse(evt.data);
         const majors = data.majors || [];
         majorsNode.innerHTML = majors.map(m => `<span class="pill">${m}</span>`).join('');
+        
+        // Display pairs with prices in table
+        const pairs = data.pairs || [];
+        pairsBody.innerHTML = pairs.map(p => `
+          <tr style="border-bottom: 1px solid #ddd;">
+            <td style="padding: 8px;">${p.pair}</td>
+            <td style="padding: 8px; text-align: right; font-weight: bold;">${p.price}</td>
+          </tr>
+        `).join('');
+        
         pairsNode.textContent = JSON.stringify(data.pairsSample || [], null, 2);
         changesNode.textContent = JSON.stringify(data.changes || [], null, 2);
       };
