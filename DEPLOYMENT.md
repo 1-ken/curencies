@@ -37,13 +37,14 @@ FROM_EMAIL=verified-sender@example.com
 
 Edit `config.json` to customize:
 - `url`: Target website to scrape
-- `streamIntervalSeconds`: Data refresh rate (default: 1)
+- `streamIntervalSeconds`: Data refresh rate (default: 1, supports decimals like 0.5)
 - `majors`: Currency codes to monitor
 
 Other runtime settings:
 - Alerts persist in `alerts.json` (JSON store in project root)
 - Email alerts use SendGrid with `FROM_EMAIL` as the sender
 - "Equal" alerts use a tolerance of ±0.0001 (1 pip) for price matching
+- Do not commit `.env` (contains API keys)
 
 ## Running
 
