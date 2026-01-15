@@ -1,0 +1,42 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Finance Observer Client</title>
+    <style>
+      body { font-family: system-ui, Arial, sans-serif; margin: 2rem; }
+      .pill { display: inline-block; padding: 4px 8px; margin: 4px; border-radius: 12px; background: #eef; }
+      pre { background: #f7f7f7; padding: 12px; border-radius: 6px; overflow-x: auto; }
+    </style>
+  </head>
+  <body>
+    <h1>Live Majors</h1>
+    <div id="majors"></div>
+
+    <h2>Pairs Sample</h2>
+    <pre id="pairs"></pre>
+
+    <h2>Mutation Changes</h2>
+    <pre id="changes"></pre>
+
+    <script>
+      const majorsNode = document.getElementById('majors');
+      const pairsNode = document.getElementById('pairs');
+      const changesNode = document.getElementById('changes');
+
+      const ws = new WebSocket('ws://localhost:8000/ws/observe');
+      ws.onopen = () => console.log('Connected');
+      ws.onerror = (e) => console.error('WebSocket error', e);
+      ws.onclose = () => console.log('Disconnected');
+
+      ws.onmessage = (evt) => {
+        const data = JSON.parse(evt.data);
+        const majors = data.majors || [];
+        majorsNode.innerHTML = majors.map(m => `<span class="pill">${m}</span>`).join('');
+        pairsNode.textContent = JSON.stringify(data.pairsSample || [], null, 2);
+        changesNode.textContent = JSON.stringify(data.changes || [], null, 2);
+      };
+    </script>
+  </body>
+</html>
