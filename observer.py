@@ -1,11 +1,14 @@
 import asyncio
 import json
+import logging
 import os
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from playwright.async_api import async_playwright, Browser, Page
+
+logger = logging.getLogger(__name__)
 
 
 class SiteObserver:
@@ -28,12 +31,16 @@ class SiteObserver:
         self.page: Optional[Page] = None
 
     async def startup(self) -> None:
-        self._pw = await async_playwright().start()
-        self.browser = await self._pw.chromium.launch(headless=True)
-        context = await self.browser.new_context()
-        self.page = await context.new_page()
-        await self.page.goto(self.url)
-        await self.page.wait_for_selector(self.wait_selector, timeout=30000)
+        """Initialize the browser and navigate to the target URL."""
+        try:
+            logger.info(f"Starting browser and navigating to {self.url}")
+            self._pw = await async_playwright().start()
+            self.browser = await self._pw.chromium.launch(headless=True)
+            context = await self.browser.new_context()
+            self.page = await context.new_page()
+            await self.page.goto(self.url)
+            await self.page.wait_for_selector(self.wait_selector, timeout=30000)
+            logger.info("Browser started successfully")
 
         if self.inject_mutation_observer:
             await self.page.evaluate(
@@ -50,12 +57,19 @@ class SiteObserver:
             )
 
     async def shutdown(self) -> None:
+        """Clean up browser resources."""
+        logger.info("Shutting down browser")
         try:
             if self.browser:
                 await self.browser.close()
+        except Exception as e:
+            logger.error(f"Error closing browser: {e}")
         finally:
             if self._pw:
-                await self._pw.stop()
+                try:
+                    await self._pw.stop()
+                except Exception as e:
+                    logger.error(f"Error stopping playwright: {e}")
 
     async def _extract_pair_cells_text(self) -> List[str]:
         if not self.page:
