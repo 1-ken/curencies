@@ -14,10 +14,6 @@ python3.13 -m venv .venv313
 
 2. **Activate environment:**
 ```bash
-# Windows
-.venv313\Scripts\Activate.ps1
-
-# Linux/Mac
 source .venv313/bin/activate
 ```
 
@@ -101,8 +97,7 @@ Alert data: `alerts.json` (safe to back up). Delete to start fresh (alerts will 
 
 **Port in use:**
 ```bash
-lsof -ti:8000 | xargs kill -9  # Linux/Mac
-taskkill /F /IM python.exe     # Windows
+lsof -ti:8000 | xargs kill -9
 ```
 
 **Browser issues:**

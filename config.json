@@ -3,7 +3,7 @@
   "waitSelector": "table tbody tr",
   "tableSelector": "table",
   "pairCellSelector": "tbody tr td:nth-child(2)",
-  "streamIntervalSeconds": 2,
+  "streamIntervalSeconds": 0.2,
   "majors": ["USD", "EUR", "JPY", "GBP", "AUD", "CAD", "CHF", "NZD"],
   "injectMutationObserver": true
 }

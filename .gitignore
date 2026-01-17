@@ -53,11 +53,6 @@ logs/
 # Alerts database
 alerts.json
 
-# Windows
-Thumbs.db
-ehthumbs.db
-Desktop.ini
-
 # Test files
 test_extraction.py
 debug_selectors.py

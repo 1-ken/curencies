@@ -1,16 +1,8 @@
 #!/usr/bin/env python
 """
-Production-ready uvicorn server launcher.
-Note: Auto-reload disabled due to Playwright/Windows subprocess limitations.
+Production-ready uvicorn server launcher for Linux.
+Note: Auto-reload disabled due to Playwright subprocess limitations.
 """
-import sys
-import asyncio
-import logging
-
-# Configure event loop for Windows
-if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-
 import uvicorn
 
 if __name__ == "__main__":
