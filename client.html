@@ -64,8 +64,19 @@
                 </select>
               </div>
               <div class="form-group">
+                <label>Delivery Method:</label>
+                <select id="alertChannel" required onchange="toggleContactFields()">
+                  <option value="email">Email</option>
+                  <option value="sms">SMS</option>
+                </select>
+              </div>
+              <div class="form-group" id="emailField">
                 <label>Email Address:</label>
-                <input type="email" id="alertEmail" placeholder="your@email.com" required />
+                <input type="email" id="alertEmail" placeholder="your@email.com" />
+              </div>
+              <div class="form-group" id="phoneField" style="display:none;">
+                <label>Phone Number (E.164):</label>
+                <input type="tel" id="alertPhone" placeholder="+254712345678" />
               </div>
               <div class="form-group">
                 <label>Custom Message (Optional):</label>
@@ -140,7 +151,7 @@
           <div class="alert-item">
             <div><strong style="font-size: 1.1em;">${a.pair}</strong></div>
             <div style="margin: 8px 0; font-size: 0.95em;">Alert when price <strong>${a.condition}</strong> <strong style="color: #007bff;">${a.target_price}</strong></div>
-            <div style="font-size: 0.85em; color: #666; margin-bottom: 10px;">📧 ${a.email}</div>
+            ${a.channel === 'sms' ? `<div style="font-size: 0.85em; color: #666; margin-bottom: 10px;">📱 ${a.phone}</div>` : `<div style="font-size: 0.85em; color: #666; margin-bottom: 10px;">📧 ${a.email}</div>`}
             ${a.custom_message ? `<div style="background-color: #fff3cd; border-left: 3px solid #ffc107; padding: 8px; margin: 8px 0; font-size: 0.9em; border-radius: 3px;"><strong>Message:</strong> ${a.custom_message}</div>` : ''}
             <div style="margin-top: 10px;">
               <button class="danger" onclick="deleteAlert('${a.id}')" style="width: 100%; padding: 8px;">Delete Alert</button>
@@ -201,14 +212,16 @@
         }
         
         const condition = document.getElementById('alertCondition').value;
+        const channel = document.getElementById('alertChannel').value;
         const email = document.getElementById('alertEmail').value;
+        const phone = document.getElementById('alertPhone').value;
         const customMessage = document.getElementById('alertMessage').value || '';
 
         try {
           const response = await fetch('/api/alerts', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ pair, target_price: targetPrice, condition, email, custom_message: customMessage })
+            body: JSON.stringify({ pair, target_price: targetPrice, condition, channel, email, phone, custom_message: customMessage })
           });
           
           if (response.ok) {
@@ -239,6 +252,22 @@
           alert(`Error: ${error.message}`);
         }
       }
+    </script>
+    <script>
+      function toggleContactFields() {
+        const channel = document.getElementById('alertChannel').value;
+        const emailField = document.getElementById('emailField');
+        const phoneField = document.getElementById('phoneField');
+        if (channel === 'sms') {
+          emailField.style.display = 'none';
+          phoneField.style.display = 'block';
+        } else {
+          emailField.style.display = 'block';
+          phoneField.style.display = 'none';
+        }
+      }
+      // Initialize
+      toggleContactFields();
     </script>
   </body>
 </html>

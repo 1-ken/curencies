@@ -21,9 +21,11 @@ class Alert:
     pair: str
     target_price: float
     condition: str  # "above", "below", or "equal"
-    email: str
     status: str  # "active", "triggered", "disabled"
     created_at: str
+    email: str = ""
+    channel: str = "email"  # "email" or "sms"
+    phone: str = ""
     custom_message: str = ""
     triggered_at: Optional[str] = None
     last_checked_price: Optional[float] = None
@@ -72,7 +74,9 @@ class AlertManager:
         pair: str,
         target_price: float,
         condition: str,
-        email: str,
+        email: str = "",
+        channel: str = "email",
+        phone: str = "",
         custom_message: str = "",
     ) -> Alert:
         """Create a new alert."""
@@ -83,6 +87,8 @@ class AlertManager:
             target_price=target_price,
             condition=condition,
             email=email,
+            channel=channel,
+            phone=phone,
             custom_message=custom_message,
             status="active",
             created_at=datetime.now().isoformat(),

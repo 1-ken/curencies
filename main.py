@@ -15,6 +15,7 @@ from pydantic import BaseModel
 from observer import SiteObserver
 from alerts import AlertManager, Alert
 from email_service import EmailService
+from sms_service import SMSService
 
 # Load environment variables from .env file
 load_dotenv()
@@ -48,12 +49,25 @@ MAJORS = CONFIG.get("majors", [])
 # Initialize alert manager and email service
 alert_manager = AlertManager()
 email_service = None
+sms_service = None
 sendgrid_api_key = os.getenv("SENDGRID_API_KEY")
 if sendgrid_api_key:
     email_service = EmailService(sendgrid_api_key)
     logger.info("SendGrid email service initialized")
 else:
     logger.warning("SENDGRID_API_KEY not set, email alerts disabled")
+
+# Initialize SMS service if credentials available
+af_username = os.getenv("AFRICASTALKING_USERNAME")
+af_api_key = os.getenv("AFRICASTALKING_API_KEY")
+if af_username and af_api_key:
+    try:
+        sms_service = SMSService(af_username, af_api_key)
+        logger.info("Africa's Talking SMS service initialized")
+    except Exception as e:
+        logger.error(f"Failed to initialize SMS service: {e}")
+else:
+    logger.warning("AFRICASTALKING credentials not set, SMS alerts disabled")
 
 app = FastAPI(
     title="Finance Observer",
@@ -136,18 +150,29 @@ async def ws_observe(ws: WebSocket):
             
             # Check price alerts
             triggered_alerts = alert_manager.check_alerts(data.get("pairs", []))
-            if triggered_alerts and email_service:
+            if triggered_alerts:
                 for alert_data in triggered_alerts:
                     alert = alert_data["alert"]
                     current_price = alert_data["current_price"]
-                    email_service.send_price_alert(
-                        to_email=alert["email"],
-                        pair=alert["pair"],
-                        target_price=alert["target_price"],
-                        current_price=current_price,
-                        condition=alert["condition"],
-                        custom_message=alert.get("custom_message", ""),
-                    )
+                    channel = alert.get("channel", "email")
+                    if channel == "sms" and sms_service and alert.get("phone"):
+                        sms_service.send_price_alert(
+                            to_phone=alert["phone"],
+                            pair=alert["pair"],
+                            target_price=alert["target_price"],
+                            current_price=current_price,
+                            condition=alert["condition"],
+                            custom_message=alert.get("custom_message", ""),
+                        )
+                    elif channel == "email" and email_service and alert.get("email"):
+                        email_service.send_price_alert(
+                            to_email=alert["email"],
+                            pair=alert["pair"],
+                            target_price=alert["target_price"],
+                            current_price=current_price,
+                            condition=alert["condition"],
+                            custom_message=alert.get("custom_message", ""),
+                        )
             
             # Include alerts in response
             data["alerts"] = {
@@ -174,7 +199,9 @@ class CreateAlertRequest(BaseModel):
     pair: str
     target_price: float
     condition: str  # "above", "below", or "equal"
-    email: str
+    channel: str = "email"  # "email" or "sms"
+    email: str = ""
+    phone: str = ""
     custom_message: str = ""  # Optional custom message for the alert email
 
 
@@ -184,11 +211,20 @@ async def create_alert(request: CreateAlertRequest):
     if request.condition not in ["above", "below", "equal"]:
         raise HTTPException(status_code=400, detail="Condition must be 'above', 'below', or 'equal'")
     
+    if request.channel not in ["email", "sms"]:
+        raise HTTPException(status_code=400, detail="Channel must be 'email' or 'sms'")
+    if request.channel == "email" and not request.email:
+        raise HTTPException(status_code=400, detail="Email is required for email alerts")
+    if request.channel == "sms" and not request.phone:
+        raise HTTPException(status_code=400, detail="Phone is required for SMS alerts")
+
     alert = alert_manager.create_alert(
         pair=request.pair,
         target_price=request.target_price,
         condition=request.condition,
         email=request.email,
+        channel=request.channel,
+        phone=request.phone,
         custom_message=request.custom_message,
     )
     return {"success": True, "alert": alert.to_dict()}

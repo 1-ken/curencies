@@ -27,6 +27,9 @@ playwright install chromium
 ```
 SENDGRID_API_KEY=your-sendgrid-api-key
 FROM_EMAIL=verified-sender@example.com
+AFRICASTALKING_USERNAME=your-africastalking-username
+AFRICASTALKING_API_KEY=your-africastalking-api-key
+AFRICASTALKING_SENDER_ID=optional-sender-id
 ```
 
 ## Configuration

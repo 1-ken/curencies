@@ -8,6 +8,7 @@ dependencies = [
     "uvicorn[standard]==0.32.0",
     "playwright==1.48.0",
     "websockets==12.0",
+    "africastalking",
 ]
 
 [project.optional-dependencies]
