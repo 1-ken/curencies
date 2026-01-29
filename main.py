@@ -117,6 +117,17 @@ async def root():
     return FileResponse(os.path.join(HERE, "client.html"))
 
 
+@app.get("/client-config")
+async def client_config():
+    """Serve client runtime configuration derived from environment.
+    Allows overriding WebSocket URL when running behind proxies or differing hosts.
+    """
+    ws_url = os.getenv("WS_URL", "")
+    return JSONResponse({
+        "wsUrl": ws_url,  # e.g., "wss://your-domain/ws/observe" or "ws://ip:8000/ws/observe"
+    })
+
+
 @app.get("/snapshot")
 async def snapshot():
     """Get a single snapshot of current forex data."""
@@ -257,3 +268,4 @@ async def delete_alert(alert_id: str):
     if alert_manager.delete_alert(alert_id):
         return {"success": True, "message": "Alert deleted"}
     raise HTTPException(status_code=404, detail="Alert not found")
+

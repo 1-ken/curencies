@@ -35,17 +35,72 @@ class SiteObserver:
         try:
             logger.info(f"Starting browser and navigating to {self.url}")
             self._pw = await async_playwright().start()
-            self.browser = await self._pw.chromium.launch(headless=True)
-            context = await self.browser.new_context()
+            self.browser = await self._pw.chromium.launch(
+                headless=True,
+                args=[
+                    '--disable-blink-features=AutomationControlled',
+                    '--disable-dev-shm-usage',
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                ]
+            )
+            context = await self.browser.new_context(
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/120.0.0.0 Safari/537.36"
+                ),
+                locale="en-US",
+                viewport={'width': 1920, 'height': 1080},
+                extra_http_headers={
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                }
+            )
+            # Override navigator.webdriver flag
+            await context.add_init_script("""{
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            }""")
             self.page = await context.new_page()
-            # Block non-essential resources to reduce latency
+            # Block heavy assets, keep stylesheets and scripts
             await self.page.route("**/*", lambda route: (
                 route.abort()
-                if route.request.resource_type in {"image", "font", "media", "stylesheet"}
+                if route.request.resource_type in {"image", "font", "media"}
                 else route.continue_()
             ))
-            await self.page.goto(self.url)
-            await self.page.wait_for_selector(self.wait_selector, timeout=30000)
+            await self.page.goto(self.url, wait_until="domcontentloaded")
+            
+            # Check for and handle cookie consent popup (Yahoo Finance)
+            await self._handle_cookie_consent()
+            
+            # Don't wait for networkidle - modern sites never reach it
+            # Instead, wait for the specific table element to appear
+            try:
+                await self.page.wait_for_selector(self.wait_selector, timeout=30000)
+            except Exception as e:
+                logger.warning(f"Wait selector timeout: {e}. Continuing anyway...")
+                # Still try to fall back to table selector
+                try:
+                    await self.page.wait_for_selector(self.table_selector, timeout=10000)
+                except Exception as e2:
+                    logger.warning(f"Table selector also not found: {e2}. Proceeding with extraction...")
+                    # Take a screenshot for debugging
+                    try:
+                        screenshot_path = f"debug_screenshot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+                        await self.page.screenshot(path=screenshot_path, full_page=True)
+                        logger.info(f"Screenshot saved to {screenshot_path}")
+                    except Exception as e3:
+                        logger.error(f"Failed to take screenshot: {e3}")
+                    # Log page content for debugging
+                    try:
+                        content = await self.page.content()
+                        logger.info(f"Page HTML length: {len(content)} characters")
+                        logger.info(f"Page title: {await self.page.title()}")
+                        # Check if we got an error page or captcha
+                        if "captcha" in content.lower() or "access denied" in content.lower():
+                            logger.error("Page appears to show captcha or access denied message")
+                    except Exception as e4:
+                        logger.error(f"Failed to get page content: {e4}")
             logger.info("Browser started successfully")
 
             if self.inject_mutation_observer:
@@ -64,6 +119,48 @@ class SiteObserver:
         except Exception as e:
             logger.error(f"Failed to start browser: {e}")
             raise
+
+    async def _handle_cookie_consent(self) -> None:
+        """Handle cookie consent popup if it appears on page load."""
+        if not self.page:
+            return
+        
+        try:
+            # Wait briefly for the consent popup to appear
+            # Try multiple possible selectors for the "Accept all" button
+            selectors = [
+                'button[name="agree"][value="agree"]',  # Yahoo Finance specific
+                'button.accept-all',
+                'button.consent_reject_all_2',
+                'button:has-text("Accepter tout")',  # French version
+                'button:has-text("Accept all")',  # English version
+            ]
+            
+            for selector in selectors:
+                try:
+                    # Check if the button exists with a short timeout
+                    consent_button = await self.page.wait_for_selector(
+                        selector, 
+                        timeout=3000,
+                        state="visible"
+                    )
+                    
+                    if consent_button:
+                        logger.info(f"Cookie consent popup detected, clicking accept button: {selector}")
+                        await consent_button.click()
+                        # Wait a moment for the popup to disappear
+                        await self.page.wait_for_timeout(1000)
+                        logger.info("Cookie consent accepted successfully")
+                        return
+                        
+                except Exception:
+                    # This selector didn't match, try the next one
+                    continue
+            
+            logger.debug("No cookie consent popup detected, continuing with normal flow")
+            
+        except Exception as e:
+            logger.warning(f"Error while handling cookie consent: {e}. Continuing anyway...")
 
     async def shutdown(self) -> None:
         """Clean up browser resources."""
@@ -136,6 +233,15 @@ class SiteObserver:
             raise RuntimeError("Observer not started. Call startup() first.")
 
         pairs_with_prices = await self._extract_pairs_with_prices()
+        if not pairs_with_prices:
+            # Extra logging to understand why stream is empty on VPS
+            try:
+                title = await self.page.title()
+                logger.warning(
+                    "Snapshot returned no pairs; page title=%s, url=%s", title, self.page.url
+                )
+            except Exception:
+                logger.warning("Snapshot returned no pairs and title fetch failed")
         texts = [item["pair"] for item in pairs_with_prices]
         majors_found = self._parse_majors_from_texts(texts, majors)
         
@@ -187,3 +293,4 @@ if __name__ == "__main__":
         print(json.dumps(data, indent=2))
 
     asyncio.run(_main())
+
