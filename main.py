@@ -76,12 +76,97 @@ app = FastAPI(
 )
 
 observer: SiteObserver | None = None
+background_task: asyncio.Task | None = None
+data_stream_task: asyncio.Task | None = None
+latest_data: Dict[str, Any] = {}
+data_subscribers: List[asyncio.Queue] = []
+
+
+async def data_streaming_task():
+    """Central task that continuously fetches market data and broadcasts to subscribers."""
+    global latest_data
+    logger.info("Data streaming task started")
+    while True:
+        try:
+            if observer:
+                # Fetch current market data
+                data = await observer.snapshot(MAJORS)
+                latest_data = data
+                
+                # Broadcast to all subscribers
+                for queue in data_subscribers[:]:  # Copy list to avoid modification during iteration
+                    try:
+                        queue.put_nowait(data.copy())
+                    except asyncio.QueueFull:
+                        # Skip if queue is full
+                        pass
+            
+            await asyncio.sleep(STREAM_INTERVAL)
+        except asyncio.CancelledError:
+            logger.info("Data streaming task cancelled")
+            break
+        except Exception as e:
+            logger.error(f"Error in data streaming task: {e}")
+            await asyncio.sleep(STREAM_INTERVAL)
+
+
+async def alert_monitoring_task():
+    """Background task that monitors alerts using data from the central stream."""
+    logger.info("Alert monitoring task started")
+    
+    # Subscribe to data stream
+    data_queue = asyncio.Queue(maxsize=10)
+    data_subscribers.append(data_queue)
+    
+    try:
+        while True:
+            try:
+                # Get data from the stream
+                data = await data_queue.get()
+                
+                # Check price alerts
+                triggered_alerts = alert_manager.check_alerts(data.get("pairs", []))
+                if triggered_alerts:
+                    for alert_data in triggered_alerts:
+                        alert = alert_data["alert"]
+                        current_price = alert_data["current_price"]
+                        channel = alert.get("channel", "email")
+                        
+                        if channel == "sms" and sms_service and alert.get("phone"):
+                            sms_service.send_price_alert(
+                                to_phone=alert["phone"],
+                                pair=alert["pair"],
+                                target_price=alert["target_price"],
+                                current_price=current_price,
+                                condition=alert["condition"],
+                                custom_message=alert.get("custom_message", ""),
+                            )
+                        elif channel == "email" and email_service and alert.get("email"):
+                            email_service.send_price_alert(
+                                to_email=alert["email"],
+                                pair=alert["pair"],
+                                target_price=alert["target_price"],
+                                current_price=current_price,
+                                condition=alert["condition"],
+                                custom_message=alert.get("custom_message", ""),
+                            )
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error in alert monitoring task: {e}")
+                # Continue running even if there's an error
+                await asyncio.sleep(0.1)
+    finally:
+        # Unsubscribe on exit
+        if data_queue in data_subscribers:
+            data_subscribers.remove(data_queue)
+        logger.info("Alert monitoring task stopped")
 
 
 @app.on_event("startup")
 async def on_startup():
     """Initialize the observer on application startup."""
-    global observer
+    global observer, background_task, data_stream_task
     logger.info("Starting Finance Observer application...")
     
     try:
@@ -94,6 +179,14 @@ async def on_startup():
         )
         await observer.startup()
         logger.info("Observer started successfully")
+        
+        # Start central data streaming task
+        data_stream_task = asyncio.create_task(data_streaming_task())
+        logger.info("Central data streaming task started")
+        
+        # Start background alert monitoring task
+        background_task = asyncio.create_task(alert_monitoring_task())
+        logger.info("Background alert monitoring task started")
     except Exception as e:
         logger.error(f"Failed to start observer: {e}")
         raise
@@ -102,6 +195,27 @@ async def on_startup():
 @app.on_event("shutdown")
 async def on_shutdown():
     """Clean up resources on application shutdown."""
+    global background_task, data_stream_task
+    
+    # Cancel background tasks
+    if background_task:
+        logger.info("Cancelling background alert monitoring task...")
+        background_task.cancel()
+        try:
+            await background_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Background task cancelled")
+    
+    if data_stream_task:
+        logger.info("Cancelling data streaming task...")
+        data_stream_task.cancel()
+        try:
+            await data_stream_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Data streaming task cancelled")
+    
     if observer:
         logger.info("Shutting down observer...")
         try:
@@ -155,49 +269,30 @@ async def ws_observe(ws: WebSocket):
         await ws.close()
         return
 
+    # Subscribe to data stream
+    data_queue = asyncio.Queue(maxsize=10)
+    data_subscribers.append(data_queue)
+
     try:
         while True:
-            data = await observer.snapshot(MAJORS)
+            # Get data from the central stream
+            data = await data_queue.get()
             
-            # Check price alerts
-            triggered_alerts = alert_manager.check_alerts(data.get("pairs", []))
-            if triggered_alerts:
-                for alert_data in triggered_alerts:
-                    alert = alert_data["alert"]
-                    current_price = alert_data["current_price"]
-                    channel = alert.get("channel", "email")
-                    if channel == "sms" and sms_service and alert.get("phone"):
-                        sms_service.send_price_alert(
-                            to_phone=alert["phone"],
-                            pair=alert["pair"],
-                            target_price=alert["target_price"],
-                            current_price=current_price,
-                            condition=alert["condition"],
-                            custom_message=alert.get("custom_message", ""),
-                        )
-                    elif channel == "email" and email_service and alert.get("email"):
-                        email_service.send_price_alert(
-                            to_email=alert["email"],
-                            pair=alert["pair"],
-                            target_price=alert["target_price"],
-                            current_price=current_price,
-                            condition=alert["condition"],
-                            custom_message=alert.get("custom_message", ""),
-                        )
-            
-            # Include alerts in response
+            # Include alerts in response (processing happens in background task)
             data["alerts"] = {
                 "active": [a.to_dict() for a in alert_manager.get_active_alerts()],
                 "triggered": [a.to_dict() for a in alert_manager.get_all_alerts() if a.status == "triggered"],
             }
             
             await ws.send_json(data)
-            await asyncio.sleep(STREAM_INTERVAL)
     except WebSocketDisconnect:
         logger.info(f"WebSocket connection closed: {ws.client}")
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
     finally:
+        # Unsubscribe from data stream
+        if data_queue in data_subscribers:
+            data_subscribers.remove(data_queue)
         try:
             await ws.close()
         except Exception:
