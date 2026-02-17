@@ -4,7 +4,7 @@ import logging
 import os
 import time
 import certifi
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
