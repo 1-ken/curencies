@@ -1,3 +1,6 @@
+"""
+Browser-based observer for real-time market data using Playwright.
+"""
 import asyncio
 import json
 import logging
@@ -286,11 +289,10 @@ async def observe_once_from_config(config_path: str) -> Dict[str, Any]:
 if __name__ == "__main__":
     # Quick manual test: prints a single snapshot
     here = os.path.dirname(__file__)
-    cfg_path = os.path.join(here, "config.json")
+    cfg_path = os.path.join(here, "..", "..", "config.json")
 
     async def _main():
         data = await observe_once_from_config(cfg_path)
         print(json.dumps(data, indent=2))
 
     asyncio.run(_main())
-

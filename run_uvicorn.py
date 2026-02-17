@@ -8,7 +8,7 @@ import uvicorn
 if __name__ == "__main__":
     # Production configuration
     uvicorn.run(
-        "main:app",
+        "app.main:app",
         host="0.0.0.0",  # Allow external connections
         port=8000,
         reload=False,
