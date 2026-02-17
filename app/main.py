@@ -6,7 +6,6 @@ import time
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
 
 from app.core.config import get_config
 from app.services.alert_service import AlertManager
@@ -139,13 +138,6 @@ app.include_router(api_v1.router)
 
 # Add data endpoints at root level (for /, /snapshot, /client-config, /ws/observe)
 app.include_router(data_endpoints.router)
-
-# Serve static files if client is needed
-HERE = os.path.dirname(__file__)
-try:
-    app.mount("/static", StaticFiles(directory=os.path.join(HERE, "..", "static")), name="static")
-except Exception as e:
-    logger.warning(f"Could not mount static files: {e}")
 
 
 if __name__ == "__main__":

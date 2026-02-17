@@ -50,8 +50,11 @@ def set_config(stream_interval: float, majors: List[str]):
 @router.get("/")
 async def root():
     """Serve the client HTML page."""
-    here = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-    return FileResponse(os.path.join(here, "client.html"))
+    # Navigate from app/api/v1/endpoints/data.py to root directory
+    from pathlib import Path
+    root_dir = Path(__file__).parent.parent.parent.parent.parent
+    client_file = root_dir / "client.html"
+    return FileResponse(str(client_file))
 
 
 @router.get("/snapshot")
