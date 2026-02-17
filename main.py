@@ -93,12 +93,15 @@ async def data_streaming_task():
                 data = await observer.snapshot(MAJORS)
                 latest_data = data
                 
-                # Broadcast to all subscribers
-                for queue in data_subscribers[:]:  # Copy list to avoid modification during iteration
+                # Broadcast to all subscribers (alert monitor and WebSocket clients)
+                # Make a copy of the list to avoid modification during iteration
+                current_subscribers = data_subscribers[:]
+                for queue in current_subscribers:
                     try:
                         queue.put_nowait(data.copy())
                     except asyncio.QueueFull:
-                        # Skip if queue is full
+                        # Queue is full, skip this subscriber
+                        logger.debug(f"Data subscriber queue full, skipping")
                         pass
             
             await asyncio.sleep(STREAM_INTERVAL)
@@ -114,19 +117,21 @@ async def alert_monitoring_task():
     """Background task that monitors alerts using data from the central stream."""
     logger.info("Alert monitoring task started")
     
-    # Subscribe to data stream
-    data_queue = asyncio.Queue(maxsize=10)
+    # Subscribe to data stream with larger queue to prevent dropping data
+    data_queue = asyncio.Queue(maxsize=50)
     data_subscribers.append(data_queue)
+    logger.info(f"Alert monitor subscribed to data stream (total subscribers: {len(data_subscribers)})")
     
     try:
         while True:
             try:
-                # Get data from the stream
-                data = await data_queue.get()
+                # Get data from the stream with timeout to ensure we keep monitoring
+                data = await asyncio.wait_for(data_queue.get(), timeout=5.0)
                 
                 # Check price alerts
                 triggered_alerts = alert_manager.check_alerts(data.get("pairs", []))
                 if triggered_alerts:
+                    logger.info(f"Triggered {len(triggered_alerts)} alert(s)")
                     for alert_data in triggered_alerts:
                         alert = alert_data["alert"]
                         current_price = alert_data["current_price"]
@@ -150,6 +155,10 @@ async def alert_monitoring_task():
                                 condition=alert["condition"],
                                 custom_message=alert.get("custom_message", ""),
                             )
+            except asyncio.TimeoutError:
+                # Queue timeout - data stream may have stopped, continue trying
+                logger.warning("Alert monitor queue timeout - no data received for 5s")
+                continue
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -160,6 +169,7 @@ async def alert_monitoring_task():
         # Unsubscribe on exit
         if data_queue in data_subscribers:
             data_subscribers.remove(data_queue)
+            logger.info(f"Alert monitor unsubscribed from data stream (total subscribers: {len(data_subscribers)})")
         logger.info("Alert monitoring task stopped")
 
 
@@ -180,13 +190,17 @@ async def on_startup():
         await observer.startup()
         logger.info("Observer started successfully")
         
+        # Start background alert monitoring task FIRST to ensure it subscribes 
+        # before data streaming begins broadcasting
+        background_task = asyncio.create_task(alert_monitoring_task())
+        logger.info("Background alert monitoring task started")
+        
+        # Give alert monitor a moment to subscribe
+        await asyncio.sleep(0.1)
+        
         # Start central data streaming task
         data_stream_task = asyncio.create_task(data_streaming_task())
         logger.info("Central data streaming task started")
-        
-        # Start background alert monitoring task
-        background_task = asyncio.create_task(alert_monitoring_task())
-        logger.info("Background alert monitoring task started")
     except Exception as e:
         logger.error(f"Failed to start observer: {e}")
         raise
@@ -261,7 +275,7 @@ async def snapshot():
 async def ws_observe(ws: WebSocket):
     """WebSocket endpoint for streaming real-time forex data."""
     await ws.accept()
-    logger.info(f"WebSocket connection established: {ws.client}")
+    logger.info(f"WebSocket connection established: {ws.client} (total subscribers: {len(data_subscribers) + 1})")
     
     if not observer:
         logger.warning("WebSocket connection but observer not ready")
@@ -270,8 +284,9 @@ async def ws_observe(ws: WebSocket):
         return
 
     # Subscribe to data stream
-    data_queue = asyncio.Queue(maxsize=10)
+    data_queue = asyncio.Queue(maxsize=50)
     data_subscribers.append(data_queue)
+    logger.info(f"WebSocket {ws.client} subscribed to data stream (total subscribers: {len(data_subscribers)})")
 
     try:
         while True:
@@ -293,6 +308,7 @@ async def ws_observe(ws: WebSocket):
         # Unsubscribe from data stream
         if data_queue in data_subscribers:
             data_subscribers.remove(data_queue)
+            logger.info(f"WebSocket {ws.client} unsubscribed from data stream (total subscribers: {len(data_subscribers)})")
         try:
             await ws.close()
         except Exception:
