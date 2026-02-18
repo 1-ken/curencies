@@ -2,13 +2,16 @@
 import asyncio
 import logging
 import os
-from typing import Any, Dict, List
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
 
 from app.services.observer_service import SiteObserver
 from app.services.alert_service import AlertManager
+from app.services.redis_service import RedisService
+from app.services.postgres_service import PostgresService
 
 logger = logging.getLogger(__name__)
 
@@ -22,10 +25,15 @@ observer: SiteObserver = None
 alert_manager: AlertManager = None
 data_subscribers: List[asyncio.Queue] = []
 latest_data: Dict[str, Any] = {}
+redis_service: Optional[RedisService] = None
+postgres_service: Optional[PostgresService] = None
 
 # Configuration
 STREAM_INTERVAL = 1.0
 MAJORS = []
+REDIS_PUBSUB_ENABLED = True
+ARCHIVE_INTERVAL = 30.0
+ARCHIVE_BATCH_SIZE = 200
 
 
 def set_observer(obs: SiteObserver):
@@ -45,6 +53,26 @@ def set_config(stream_interval: float, majors: List[str]):
     global STREAM_INTERVAL, MAJORS
     STREAM_INTERVAL = stream_interval
     MAJORS = majors
+
+
+def set_redis_service(service: Optional[RedisService], pubsub_enabled: bool):
+    """Set the Redis service instance."""
+    global redis_service, REDIS_PUBSUB_ENABLED
+    redis_service = service
+    REDIS_PUBSUB_ENABLED = pubsub_enabled
+
+
+def set_postgres_service(service: Optional[PostgresService]):
+    """Set the PostgreSQL service instance."""
+    global postgres_service
+    postgres_service = service
+
+
+def set_archive_config(interval_seconds: float, batch_size: int):
+    """Set archival task configuration."""
+    global ARCHIVE_INTERVAL, ARCHIVE_BATCH_SIZE
+    ARCHIVE_INTERVAL = interval_seconds
+    ARCHIVE_BATCH_SIZE = batch_size
 
 
 @router.get("/")
@@ -95,36 +123,53 @@ async def ws_observe(ws: WebSocket):
         await ws.close()
         return
 
-    # Subscribe to data stream
-    data_queue = asyncio.Queue(maxsize=50)
-    data_subscribers.append(data_queue)
-    logger.info(f"WebSocket {ws.client} subscribed to data stream (total subscribers: {len(data_subscribers)})")
-
     try:
-        while True:
-            # Get data from the central stream
-            data = await data_queue.get()
-            
-            # Include alerts in response (processing happens in background task)
-            data["alerts"] = {
-                "active": [a.to_dict() for a in alert_manager.get_active_alerts()],
-                "triggered": [a.to_dict() for a in alert_manager.get_all_alerts() if a.status == "triggered"],
-            }
-            
-            await ws.send_json(data)
+        if redis_service and REDIS_PUBSUB_ENABLED:
+            logger.info("WebSocket %s using Redis pub/sub stream", ws.client)
+            async for data in redis_service.subscribe():
+                data = _attach_alerts(data)
+                await ws.send_json(data)
+        else:
+            # Subscribe to data stream
+            data_queue = asyncio.Queue(maxsize=50)
+            data_subscribers.append(data_queue)
+            logger.info(
+                "WebSocket %s subscribed to data stream (total subscribers: %s)",
+                ws.client,
+                len(data_subscribers),
+            )
+
+            while True:
+                # Get data from the central stream
+                data = await data_queue.get()
+                data = _attach_alerts(data)
+                await ws.send_json(data)
     except WebSocketDisconnect:
         logger.info(f"WebSocket connection closed: {ws.client}")
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
     finally:
-        # Unsubscribe from data stream
-        if data_queue in data_subscribers:
-            data_subscribers.remove(data_queue)
-            logger.info(f"WebSocket {ws.client} unsubscribed from data stream (total subscribers: {len(data_subscribers)})")
+        if not (redis_service and REDIS_PUBSUB_ENABLED):
+            if "data_queue" in locals() and data_queue in data_subscribers:
+                data_subscribers.remove(data_queue)
+                logger.info(
+                    "WebSocket %s unsubscribed from data stream (total subscribers: %s)",
+                    ws.client,
+                    len(data_subscribers),
+                )
         try:
             await ws.close()
         except Exception:
             pass
+
+
+def _attach_alerts(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Attach alert payloads to a data snapshot."""
+    data["alerts"] = {
+        "active": [a.to_dict() for a in alert_manager.get_active_alerts()],
+        "triggered": [a.to_dict() for a in alert_manager.get_all_alerts() if a.status == "triggered"],
+    }
+    return data
 
 
 async def data_streaming_task():
@@ -137,6 +182,12 @@ async def data_streaming_task():
                 # Fetch current market data
                 data = await observer.snapshot(MAJORS)
                 latest_data = data
+
+                if redis_service:
+                    try:
+                        await redis_service.publish_snapshot(data)
+                    except Exception as e:
+                        logger.error("Failed to publish snapshot to Redis: %s", e)
                 
                 # Broadcast to all subscribers (alert monitor and WebSocket clients)
                 # Make a copy of the list to avoid modification during iteration
@@ -234,3 +285,73 @@ async def alert_monitoring_task():
             data_subscribers.remove(data_queue)
             logger.info(f"Alert monitor unsubscribed from data stream (total subscribers: {len(data_subscribers)})")
         logger.info("Alert monitoring task stopped")
+
+
+async def archive_snapshots_task():
+    """Background task that moves Redis snapshot data to PostgreSQL."""
+    if not redis_service or not postgres_service:
+        logger.warning("Archive task started without Redis/PostgreSQL available")
+        return
+
+    logger.info("Archive task started")
+    while True:
+        try:
+            batch = await redis_service.read_queue(ARCHIVE_BATCH_SIZE)
+            if batch:
+                inserted = await postgres_service.insert_snapshots(batch)
+                logger.info("Archived %s historical rows", inserted)
+            await asyncio.sleep(ARCHIVE_INTERVAL)
+        except asyncio.CancelledError:
+            logger.info("Archive task cancelled")
+            break
+        except Exception as e:
+            logger.error("Error in archive task: %s", e)
+            await asyncio.sleep(ARCHIVE_INTERVAL)
+
+
+@router.get("/historical")
+async def historical_data(
+    pair: Optional[str] = None,
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    limit: int = 500,
+    order: str = "desc",
+):
+    """Query historical data stored in PostgreSQL."""
+    if not postgres_service:
+        return JSONResponse({"error": "Historical storage not available"}, status_code=503)
+
+    start_dt = _parse_query_datetime(start)
+    end_dt = _parse_query_datetime(end)
+    descending = order.lower() != "asc"
+    limit = max(1, min(limit, 5000))
+
+    rows = await postgres_service.query_history(
+        pair=pair,
+        start=start_dt,
+        end=end_dt,
+        limit=limit,
+        descending=descending,
+    )
+    items = [
+        {
+            "pair": row.pair,
+            "price": float(row.price),
+            "observed_at": row.observed_at.isoformat(),
+            "source_title": row.source_title,
+        }
+        for row in rows
+    ]
+    return JSONResponse({"count": len(items), "items": items})
+
+
+def _parse_query_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)

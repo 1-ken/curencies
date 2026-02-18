@@ -1,0 +1,372 @@
+{
+  "info": {
+    "name": "Finance Observer API",
+    "description": "Real-time forex currency pair price monitoring with price alerts",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "version": "1.0.0"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000",
+      "type": "string"
+    },
+    {
+      "key": "api_base",
+      "value": "{{base_url}}/api/v1",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Data & Streaming",
+      "description": "Endpoints for real-time forex data",
+      "item": [
+        {
+          "name": "Home / Client HTML",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/",
+              "host": ["{{base_url}}"],
+              "path": [""]
+            },
+            "description": "Serves the client HTML page"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Current Snapshot",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/snapshot",
+              "host": ["{{base_url}}"],
+              "path": ["snapshot"]
+            },
+            "description": "Get a single snapshot of current forex data"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Client Config",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/client-config",
+              "host": ["{{base_url}}"],
+              "path": ["client-config"]
+            },
+            "description": "Get client runtime configuration (WebSocket URL, etc.)"
+          },
+          "response": []
+        },
+        {
+          "name": "Query Historical Data",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/historical?pair=EURUSD&start=2026-02-18T00:00:00Z&end=2026-02-18T23:59:59Z&limit=500&order=desc",
+              "host": ["{{base_url}}"],
+              "path": ["historical"],
+              "query": [
+                {
+                  "key": "pair",
+                  "value": "EURUSD",
+                  "disabled": true,
+                  "description": "Optional: filter by currency pair (e.g., EURUSD)"
+                },
+                {
+                  "key": "start",
+                  "value": "2026-02-18T00:00:00Z",
+                  "disabled": true,
+                  "description": "Optional: start date-time (ISO 8601)"
+                },
+                {
+                  "key": "end",
+                  "value": "2026-02-18T23:59:59Z",
+                  "disabled": true,
+                  "description": "Optional: end date-time (ISO 8601)"
+                },
+                {
+                  "key": "limit",
+                  "value": "500",
+                  "description": "Max results (1-5000, default 500)"
+                },
+                {
+                  "key": "order",
+                  "value": "desc",
+                  "description": "Sort order: 'desc' (default) or 'asc'"
+                }
+              ]
+            },
+            "description": "Query historical data stored in PostgreSQL"
+          },
+          "response": []
+        },
+        {
+          "name": "WebSocket Real-time Stream",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Connection",
+                "value": "Upgrade"
+              },
+              {
+                "key": "Upgrade",
+                "value": "websocket"
+              },
+              {
+                "key": "Sec-WebSocket-Version",
+                "value": "13"
+              },
+              {
+                "key": "Sec-WebSocket-Key",
+                "value": "SGVsbG8sIHdvcmxkIQ=="
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/ws/observe",
+              "host": ["{{base_url}}"],
+              "path": ["ws/observe"]
+            },
+            "description": "WebSocket endpoint for streaming real-time forex data and alerts. Connect with a WebSocket client to receive live updates."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Alerts API",
+      "description": "Endpoints for managing price alerts",
+      "item": [
+        {
+          "name": "Get All Alerts",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{api_base}}/alerts",
+              "host": ["{{base_url}}", "api", "v1"],
+              "path": ["alerts"]
+            },
+            "description": "Retrieve all alerts (active, triggered, and all)"
+          },
+          "response": []
+        },
+        {
+          "name": "Create Alert",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"pair\": \"EURUSD\",\n  \"target_price\": 1.0850,\n  \"condition\": \"above\",\n  \"channel\": \"email\",\n  \"email\": \"user@example.com\",\n  \"phone\": \"\",\n  \"custom_message\": \"EUR/USD reached important level\"\n}"
+            },
+            "url": {
+              "raw": "{{api_base}}/alerts",
+              "host": ["{{base_url}}", "api", "v1"],
+              "path": ["alerts"]
+            },
+            "description": "Create a new price alert. Supports email and SMS channels."
+          },
+          "response": []
+        },
+        {
+          "name": "Create Alert (SMS)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"pair\": \"GBPUSD\",\n  \"target_price\": 1.2700,\n  \"condition\": \"below\",\n  \"channel\": \"sms\",\n  \"email\": \"\",\n  \"phone\": \"+1234567890\",\n  \"custom_message\": \"GBP/USD dropped below target\"\n}"
+            },
+            "url": {
+              "raw": "{{api_base}}/alerts",
+              "host": ["{{base_url}}", "api", "v1"],
+              "path": ["alerts"]
+            },
+            "description": "Create an SMS price alert (requires AFRICASTALKING credentials)"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Specific Alert",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{api_base}}/alerts/{{alert_id}}",
+              "host": ["{{base_url}}", "api", "v1"],
+              "path": ["alerts", "{{alert_id}}"]
+            },
+            "description": "Get details of a specific alert by ID"
+          },
+          "response": []
+        },
+        {
+          "name": "Delete Alert",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{api_base}}/alerts/{{alert_id}}",
+              "host": ["{{base_url}}", "api", "v1"],
+              "path": ["alerts", "{{alert_id}}"]
+            },
+            "description": "Delete an alert by ID"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Examples & Test Scenarios",
+      "description": "Example requests and common test scenarios",
+      "item": [
+        {
+          "name": "Test Workflow - Create & Monitor Alert",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/snapshot",
+              "host": ["{{base_url}}"],
+              "path": ["snapshot"]
+            },
+            "description": "1. Get current snapshot to see available pairs and prices\n2. Create an alert above/below current price\n3. Monitor via WebSocket for real-time updates\n4. Query historical data to verify archival"
+          },
+          "response": []
+        },
+        {
+          "name": "Historical Data - Last Hour",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/historical?limit=100&order=desc",
+              "host": ["{{base_url}}"],
+              "path": ["historical"],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "100"
+                },
+                {
+                  "key": "order",
+                  "value": "desc"
+                }
+              ]
+            },
+            "description": "Get recent historical data (no time filter = all archived data)"
+          },
+          "response": []
+        },
+        {
+          "name": "Historical Data - Single Pair",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/historical?pair=EURUSD&limit=50&order=asc",
+              "host": ["{{base_url}}"],
+              "path": ["historical"],
+              "query": [
+                {
+                  "key": "pair",
+                  "value": "EURUSD"
+                },
+                {
+                  "key": "limit",
+                  "value": "50"
+                },
+                {
+                  "key": "order",
+                  "value": "asc"
+                }
+              ]
+            },
+            "description": "Get historical data for a specific pair (EURUSD)"
+          },
+          "response": []
+        },
+        {
+          "name": "Create Multiple Alerts",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"pair\": \"USDJPY\",\n  \"target_price\": 150.00,\n  \"condition\": \"above\",\n  \"channel\": \"email\",\n  \"email\": \"alerts@example.com\",\n  \"custom_message\": \"USD/JPY above 150\"\n}"
+            },
+            "url": {
+              "raw": "{{api_base}}/alerts",
+              "host": ["{{base_url}}", "api", "v1"],
+              "path": ["alerts"]
+            },
+            "description": "Create another alert to test multiple active alerts"
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}

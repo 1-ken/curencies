@@ -6,10 +6,13 @@ import time
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
 
 from app.core.config import get_config
 from app.services.alert_service import AlertManager
 from app.services.observer_service import SiteObserver
+from app.services.postgres_service import PostgresService
+from app.services.redis_service import RedisService
 from app.api.v1 import api as api_v1
 from app.api.v1.endpoints import alerts as alerts_endpoints
 from app.api.v1.endpoints import data as data_endpoints
@@ -36,11 +39,25 @@ app = FastAPI(
     version="1.0.0"
 )
 
+
+@app.middleware("http")
+async def normalize_paths(request, call_next):
+    path = request.url.path
+    stripped = path.rstrip()
+    if stripped != path:
+        return RedirectResponse(url=stripped, status_code=307)
+    if path in {"/Historical", "/Snapshot"}:
+        return RedirectResponse(url=path.lower(), status_code=307)
+    return await call_next(request)
+
 # Global state
 observer: SiteObserver | None = None
 alert_manager: AlertManager = AlertManager()
 background_task: asyncio.Task | None = None
 data_stream_task: asyncio.Task | None = None
+archive_task: asyncio.Task | None = None
+redis_service: RedisService | None = None
+postgres_service: PostgresService | None = None
 
 # Initialize services
 sendgrid_api_key = os.getenv("SENDGRID_API_KEY")
@@ -60,10 +77,36 @@ else:
 @app.on_event("startup")
 async def on_startup():
     """Initialize the observer on application startup."""
-    global observer, background_task, data_stream_task
+    global observer, background_task, data_stream_task, archive_task
+    global redis_service, postgres_service
     logger.info("Starting Finance Observer application...")
     
     try:
+        redis_service = RedisService(
+            url=config.redis_url,
+            channel=config.redis_channel,
+            latest_key=config.redis_latest_key,
+            queue_key=config.redis_queue_key,
+            recent_key=config.redis_recent_key,
+            recent_maxlen=config.redis_recent_maxlen,
+        )
+        try:
+            await redis_service.connect()
+        except Exception as e:
+            logger.warning("Redis unavailable: %s", e)
+            redis_service = None
+
+        postgres_service = PostgresService(
+            config.postgres_dsn,
+            maintenance_db=config.postgres_maintenance_db,
+        )
+        try:
+            await postgres_service.connect()
+            await postgres_service.init_models()
+        except Exception as e:
+            logger.warning("PostgreSQL unavailable: %s", e)
+            postgres_service = None
+
         observer = SiteObserver(
             url=config.url,
             table_selector=config.table_selector,
@@ -79,6 +122,12 @@ async def on_startup():
         data_endpoints.set_observer(observer)
         data_endpoints.set_alert_manager(alert_manager)
         data_endpoints.set_config(config.stream_interval_seconds, config.majors)
+        data_endpoints.set_redis_service(redis_service, config.redis_pubsub_enabled)
+        data_endpoints.set_postgres_service(postgres_service)
+        data_endpoints.set_archive_config(
+            config.archive_interval_seconds,
+            config.archive_batch_size,
+        )
         
         # Start background alert monitoring task FIRST to ensure it subscribes 
         # before data streaming begins broadcasting
@@ -91,6 +140,10 @@ async def on_startup():
         # Start central data streaming task
         data_stream_task = asyncio.create_task(data_endpoints.data_streaming_task())
         logger.info("Central data streaming task started")
+
+        if redis_service and postgres_service:
+            archive_task = asyncio.create_task(data_endpoints.archive_snapshots_task())
+            logger.info("Archive task started")
     except Exception as e:
         logger.error(f"Failed to start observer: {e}")
         raise
@@ -99,7 +152,8 @@ async def on_startup():
 @app.on_event("shutdown")
 async def on_shutdown():
     """Clean up resources on application shutdown."""
-    global background_task, data_stream_task
+    global background_task, data_stream_task, archive_task
+    global redis_service, postgres_service
     
     logger.info("Shutting down Finance Observer...")
     
@@ -121,6 +175,15 @@ async def on_shutdown():
         except asyncio.CancelledError:
             pass
         logger.info("Data streaming task cancelled")
+
+    if archive_task:
+        logger.info("Cancelling archive task...")
+        archive_task.cancel()
+        try:
+            await archive_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Archive task cancelled")
     
     if observer:
         logger.info("Shutting down observer...")
@@ -129,6 +192,18 @@ async def on_shutdown():
             logger.info("Observer shutdown complete")
         except Exception as e:
             logger.error(f"Error during shutdown: {e}")
+
+    if redis_service:
+        try:
+            await redis_service.close()
+        except Exception as e:
+            logger.error("Error closing Redis: %s", e)
+
+    if postgres_service:
+        try:
+            await postgres_service.close()
+        except Exception as e:
+            logger.error("Error closing PostgreSQL: %s", e)
     
     logger.info("Finance Observer shutdown complete")
 
