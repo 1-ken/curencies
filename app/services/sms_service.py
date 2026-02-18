@@ -16,8 +16,10 @@ class SMSService:
     def __init__(self, username: str, api_key: str):
         africastalking.initialize(username, api_key)
         self.sms = africastalking.SMS
+        self.username = username
         # Optional: Sender ID if configured in Africa's Talking
         self.sender_id = os.getenv("AFRICASTALKING_SENDER_ID", "")
+        logger.info(f"SMSService initialized for username: {username}")
 
     def send_price_alert(
         self,
@@ -42,8 +44,15 @@ class SMSService:
             if self.sender_id:
                 params["from_"] = self.sender_id
 
+            logger.debug(f"Sending SMS to {to_phone}: {msg}")
             response = self.sms.send(msg, [to_phone], **params)
-            logger.info(f"SMS sent to {to_phone}: {response}")
+            
+            # Check response status
+            if response["status"] == "error" or response["statusCode"] != 200:
+                logger.error(f"SMS API error for {to_phone}: {response}")
+                return False
+            
+            logger.warning(f"✓ SMS sent to {to_phone}: {pair} alert")
             return True
         except Exception as e:
             logger.error(f"Failed to send SMS to {to_phone}: {e}")

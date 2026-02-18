@@ -139,13 +139,19 @@ class AlertManager:
         triggered = []
         
         # Create price lookup - remove commas from price strings first
-        prices = {item["pair"]: float(item["price"].replace(",", "")) for item in pairs_data}
+        # Normalize pair names: remove slashes, convert to uppercase
+        prices = {}
+        for item in pairs_data:
+            normalized_pair = self._normalize_pair(item["pair"])
+            prices[normalized_pair] = float(item["price"].replace(",", ""))
         
         for alert in self.get_active_alerts():
-            if alert.pair not in prices:
+            normalized_alert_pair = self._normalize_pair(alert.pair)
+            
+            if normalized_alert_pair not in prices:
                 continue
             
-            current_price = prices[alert.pair]
+            current_price = prices[normalized_alert_pair]
             alert.last_checked_price = current_price
             
             should_trigger = False
@@ -160,6 +166,10 @@ class AlertManager:
                     should_trigger = True
             
             if should_trigger:
+                logger.warning(
+                    "⚠️  ALERT TRIGGERED: %s %s %s | Current Price: %s",
+                    alert.pair, alert.condition, alert.target_price, current_price
+                )
                 self.trigger_alert(alert.id, current_price)
                 triggered.append({
                     "alert": alert.to_dict(),
@@ -167,3 +177,11 @@ class AlertManager:
                 })
         
         return triggered
+
+    @staticmethod
+    def _normalize_pair(pair: str) -> str:
+        """Normalize pair name: remove slashes, convert to uppercase.
+        
+        Examples: 'EUR/USD' -> 'EURUSD', 'eurusd' -> 'EURUSD', 'EURUSD' -> 'EURUSD'
+        """
+        return pair.replace("/", "").upper()

@@ -245,7 +245,7 @@ async def alert_monitoring_task():
                 # Check price alerts
                 triggered_alerts = alert_manager.check_alerts(data.get("pairs", []))
                 if triggered_alerts:
-                    logger.info(f"Triggered {len(triggered_alerts)} alert(s)")
+                    logger.warning(f"Triggered {len(triggered_alerts)} alert(s)")
                     for alert_data in triggered_alerts:
                         alert = alert_data["alert"]
                         current_price = alert_data["current_price"]
@@ -299,7 +299,8 @@ async def archive_snapshots_task():
             batch = await redis_service.read_queue(ARCHIVE_BATCH_SIZE)
             if batch:
                 inserted = await postgres_service.insert_snapshots(batch)
-                logger.info("Archived %s historical rows", inserted)
+                if inserted > 0:
+                    logger.debug("Archived %s rows", inserted)
             await asyncio.sleep(ARCHIVE_INTERVAL)
         except asyncio.CancelledError:
             logger.info("Archive task cancelled")
