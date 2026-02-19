@@ -124,6 +124,54 @@
           "response": []
         },
         {
+          "name": "Query OHLC Candlesticks",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/historical/ohlc?pair=EURUSD&interval=5m&start=2026-02-18T00:00:00Z&limit=100",
+              "host": ["{{base_url}}"],
+              "path": ["historical", "ohlc"],
+              "query": [
+                {
+                  "key": "pair",
+                  "value": "EURUSD",
+                  "description": "Required: currency pair (e.g., EURUSD, GBPUSD)"
+                },
+                {
+                  "key": "interval",
+                  "value": "5m",
+                  "description": "Time interval: 1m, 5m, 15m, 30m, 1h, 4h, 1d (default: 5m)"
+                },
+                {
+                  "key": "start",
+                  "value": "2026-02-18T00:00:00Z",
+                  "disabled": true,
+                  "description": "Optional: start date-time (ISO 8601)"
+                },
+                {
+                  "key": "end",
+                  "value": "2026-02-18T23:59:59Z",
+                  "disabled": true,
+                  "description": "Optional: end date-time (ISO 8601)"
+                },
+                {
+                  "key": "limit",
+                  "value": "100",
+                  "description": "Max candles (1-5000, default 1000)"
+                }
+              ]
+            },
+            "description": "Get OHLC candlestick data aggregated by time interval (5m, 1h, 1d, etc.)"
+          },
+          "response": []
+        },
+        {
           "name": "WebSocket Real-time Stream",
           "request": {
             "method": "GET",

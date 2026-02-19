@@ -346,6 +346,78 @@ async def historical_data(
     return JSONResponse({"count": len(items), "items": items})
 
 
+@router.get("/historical/ohlc")
+async def historical_ohlc(
+    pair: str,
+    interval: str = "5m",
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    limit: int = 1000,
+):
+    """Query OHLC candlestick data aggregated by time interval.
+    
+    Args:
+        pair: Currency pair (e.g., EURUSD, GBPUSD)
+        interval: Time interval - 1m, 5m, 15m, 30m, 1h, 4h, 1d (default: 5m)
+        start: Start datetime (ISO 8601 format, optional)
+        end: End datetime (ISO 8601 format, optional)
+        limit: Max candles to return (1-5000, default: 1000)
+        
+    Returns:
+        JSON with pair, interval, count, and array of OHLC candles
+    """
+    if not postgres_service:
+        return JSONResponse({"error": "Historical storage not available"}, status_code=503)
+
+    # Validate interval
+    valid_intervals = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
+    if interval not in valid_intervals:
+        return JSONResponse(
+            {"error": f"Invalid interval. Must be one of: {', '.join(valid_intervals)}"},
+            status_code=400
+        )
+
+    start_dt = _parse_query_datetime(start)
+    end_dt = _parse_query_datetime(end)
+    limit = max(1, min(limit, 5000))
+
+    try:
+        candles = await postgres_service.query_ohlc(
+            pair=pair.upper().replace("/", ""),  # Normalize pair name
+            interval=interval,
+            start=start_dt,
+            end=end_dt,
+            limit=limit,
+        )
+        
+        # Format response
+        formatted_candles = [
+            {
+                "timestamp": candle["timestamp"].isoformat(),
+                "open": candle["open"],
+                "high": candle["high"],
+                "low": candle["low"],
+                "close": candle["close"],
+                "volume": candle["volume"],
+            }
+            for candle in candles
+        ]
+        
+        return JSONResponse({
+            "pair": pair,
+            "interval": interval,
+            "start": start_dt.isoformat() if start_dt else None,
+            "end": end_dt.isoformat() if end_dt else None,
+            "count": len(formatted_candles),
+            "candles": formatted_candles,
+        })
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:
+        logger.error(f"Error querying OHLC data: {e}")
+        return JSONResponse({"error": "Failed to query OHLC data"}, status_code=500)
+
+
 def _parse_query_datetime(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None

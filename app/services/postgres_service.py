@@ -99,6 +99,93 @@ class PostgresService:
             result = await session.execute(stmt)
             return list(result.scalars().all())
 
+    async def query_ohlc(
+        self,
+        pair: str,
+        interval: str,
+        start: Optional[datetime],
+        end: Optional[datetime],
+        limit: int = 1000,
+    ) -> List[Dict[str, Any]]:
+        """Query OHLC candlestick data aggregated by interval.
+        
+        Args:
+            pair: Currency pair (e.g., EURUSD)
+            interval: Time interval (5m, 15m, 1h, 4h, 1d)
+            start: Start datetime filter
+            end: End datetime filter
+            limit: Max number of candles to return
+            
+        Returns:
+            List of dicts with timestamp, open, high, low, close, volume
+        """
+        if not self._sessionmaker:
+            raise RuntimeError("PostgreSQL session not initialized")
+
+        # Map interval to PostgreSQL interval
+        interval_map = {
+            "1m": "1 minute",
+            "5m": "5 minutes",
+            "15m": "15 minutes",
+            "30m": "30 minutes",
+            "1h": "1 hour",
+            "4h": "4 hours",
+            "1d": "1 day",
+        }
+        
+        if interval not in interval_map:
+            raise ValueError(f"Invalid interval: {interval}. Must be one of {list(interval_map.keys())}")
+        
+        pg_interval = interval_map[interval]
+        
+        # Build SQL query for OHLC aggregation
+        query = text("""
+            WITH candles AS (
+                SELECT
+                    DATE_TRUNC(:interval_unit, observed_at) AS bucket,
+                    (ARRAY_AGG(price ORDER BY observed_at ASC))[1] AS open,
+                    MAX(price) AS high,
+                    MIN(price) AS low,
+                    (ARRAY_AGG(price ORDER BY observed_at DESC))[1] AS close,
+                    COUNT(*) AS volume
+                FROM historical_prices
+                WHERE pair = :pair
+                    AND (:start IS NULL OR observed_at >= :start)
+                    AND (:end IS NULL OR observed_at <= :end)
+                GROUP BY bucket
+                ORDER BY bucket DESC
+                LIMIT :limit
+            )
+            SELECT * FROM candles ORDER BY bucket ASC
+        """)
+        
+        # Extract just the time unit for DATE_TRUNC (minute, hour, day)
+        interval_unit = pg_interval.split()[-1].rstrip('s')  # '5 minutes' -> 'minute'
+        
+        params = {
+            "pair": pair,
+            "interval_unit": interval_unit,
+            "start": start,
+            "end": end,
+            "limit": limit,
+        }
+        
+        async with self._sessionmaker() as session:
+            result = await session.execute(query, params)
+            rows = result.fetchall()
+            
+            return [
+                {
+                    "timestamp": row[0],
+                    "open": float(row[1]),
+                    "high": float(row[2]),
+                    "low": float(row[3]),
+                    "close": float(row[4]),
+                    "volume": int(row[5]),
+                }
+                for row in rows
+            ]
+
     @staticmethod
     def _parse_timestamp(value: Optional[str]) -> datetime:
         if not value:
