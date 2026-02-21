@@ -12,6 +12,7 @@ from app.services.observer_service import SiteObserver
 from app.services.alert_service import AlertManager
 from app.services.redis_service import RedisService
 from app.services.postgres_service import PostgresService
+from app.utils.forex_market_hours import is_forex_market_open, get_time_until_market_opens
 
 logger = logging.getLogger(__name__)
 
@@ -173,11 +174,37 @@ def _attach_alerts(data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 async def data_streaming_task():
-    """Central task that continuously fetches market data and broadcasts to subscribers."""
+    """Central task that continuously fetches market data and broadcasts to subscribers.
+    
+    Only broadcasts data when the forex market is open (24/5 operation).
+    Market hours: Sunday 22:00 UTC - Friday 22:00 UTC
+    """
     global latest_data
-    logger.info("Data streaming task started")
+    logger.info("Data streaming task started (with forex market hours restrictions)")
+    
+    market_closed_logged = False
+    
     while True:
         try:
+            # Check if forex market is open
+            if not is_forex_market_open():
+                if not market_closed_logged:
+                    time_until_open = get_time_until_market_opens()
+                    logger.info(
+                        "🔒 Forex market is CLOSED. Data streaming paused. "
+                        f"Market opens in: {time_until_open}"
+                    )
+                    market_closed_logged = True
+                
+                # Sleep for a longer interval when market is closed (check every 5 minutes)
+                await asyncio.sleep(300)
+                continue
+            
+            # Market is open - reset the logged flag
+            if market_closed_logged:
+                logger.info("✅ Forex market is OPEN. Resuming data streaming.")
+                market_closed_logged = False
+            
             if observer:
                 # Fetch current market data
                 data = await observer.snapshot(MAJORS)
@@ -210,8 +237,12 @@ async def data_streaming_task():
 
 
 async def alert_monitoring_task():
-    """Background task that monitors alerts using data from the central stream."""
-    logger.info("Alert monitoring task started")
+    """Background task that monitors alerts using data from the central stream.
+    
+    Only processes alerts when the forex market is open (24/5 operation).
+    Market hours: Sunday 22:00 UTC - Friday 22:00 UTC
+    """
+    logger.info("Alert monitoring task started (with forex market hours restrictions)")
     
     # Dynamically import here to avoid circular imports
     from app.services.email_service import EmailService
@@ -239,7 +270,13 @@ async def alert_monitoring_task():
     try:
         while True:
             try:
-                # Get data from the stream with timeout to ensure we keep monitoring
+                # Check if market is closed first - if so, skip waiting for data
+                if not is_forex_market_open():
+                    # Market is closed, no alerts to process - sleep longer
+                    await asyncio.sleep(60)  # Check every 60 seconds when market closed
+                    continue
+                
+                # Market is open - wait for data with timeout
                 data = await asyncio.wait_for(data_queue.get(), timeout=5.0)
                 
                 # Check price alerts
@@ -270,8 +307,8 @@ async def alert_monitoring_task():
                                 custom_message=alert.get("custom_message", ""),
                             )
             except asyncio.TimeoutError:
-                # Queue timeout - data stream may have stopped, continue trying
-                logger.warning("Alert monitor queue timeout - no data received for 5s")
+                # Queue timeout only when market is open - data stream may be slow
+                logger.debug("Alert monitor: no data received within 5s (market may be busy)")
                 continue
             except asyncio.CancelledError:
                 break
@@ -288,19 +325,39 @@ async def alert_monitoring_task():
 
 
 async def archive_snapshots_task():
-    """Background task that moves Redis snapshot data to PostgreSQL."""
+    """Background task that moves Redis snapshot data to PostgreSQL.
+    
+    Only archives data when the forex market is open to ensure clean,
+    trading-hour data in the database. Market-closed snapshots are discarded.
+    """
     if not redis_service or not postgres_service:
         logger.warning("Archive task started without Redis/PostgreSQL available")
         return
 
-    logger.info("Archive task started")
+    logger.info("Archive task started (with forex market hours restrictions)")
+    
     while True:
         try:
+            # Only archive if market is open
+            if not is_forex_market_open():
+                # Market is closed - discard all queued snapshots to avoid stale data
+                batch = await redis_service.read_queue(ARCHIVE_BATCH_SIZE)
+                if batch:
+                    logger.info(
+                        "🔒 Market closed - discarded %d snapshot(s) from queue to maintain clean database",
+                        len(batch)
+                    )
+                # Wait longer when market is closed
+                await asyncio.sleep(300)
+                continue
+            
+            # Market is open - archive the data to PostgreSQL
             batch = await redis_service.read_queue(ARCHIVE_BATCH_SIZE)
             if batch:
                 inserted = await postgres_service.insert_snapshots(batch)
                 if inserted > 0:
-                    logger.debug("Archived %s rows", inserted)
+                    logger.debug("✅ Archived %s rows to PostgreSQL (market is open)", inserted)
+            
             await asyncio.sleep(ARCHIVE_INTERVAL)
         except asyncio.CancelledError:
             logger.info("Archive task cancelled")

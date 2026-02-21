@@ -2,6 +2,8 @@
 
 Streams live snapshots from a JS-heavy site using Playwright, extracts main FX currencies from a currency-pairs table via CSS selectors, and serves them over WebSockets.
 
+**🌎 Forex Market Hours Feature**: This application automatically respects forex market operating hours (24/5). Data streaming and alert monitoring only occur when the forex market is open (Sunday 22:00 UTC - Friday 22:00 UTC). See [FOREX_MARKET_HOURS.md](FOREX_MARKET_HOURS.md) for details.
+
 ## Configure
 Edit `config.json`:
 - `url`: Target website.
