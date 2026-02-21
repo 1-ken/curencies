@@ -144,23 +144,44 @@
 
       function handleMessage(evt) {
         const data = JSON.parse(evt.data);
-        const majors = data.majors || [];
+        
+        // Extract major currencies from pairs if available
+        const pairs = data.pairs || [];
+        const majorsSet = new Set();
+        const majorsList = ["USD", "EUR", "JPY", "GBP", "AUD", "CAD", "CHF", "NZD"];
+        pairs.forEach(p => {
+          majorsList.forEach(maj => {
+            if (p.pair.includes(maj)) majorsSet.add(maj);
+          });
+        });
+        const majors = Array.from(majorsSet).sort();
         majorsNode.innerHTML = majors.map(m => `<span class="pill">${m}</span>`).join('');
         
-        // Display pairs with prices
-        const pairs = data.pairs || [];
+        // Display market status
+        const marketStatus = data.market_status || 'unknown';
+        const statusIndicator = marketStatus === 'open' 
+          ? '<span style="color: #28a745; font-weight: bold;">🟢 OPEN</span>'
+          : '<span style="color: #dc3545; font-weight: bold;">🔴 CLOSED</span>';
         
         // Update the currency pair dropdown with available pairs
         const currentValue = alertPairSelect.value;
         alertPairSelect.innerHTML = '<option value="">Select a currency pair...</option>' + 
           pairs.map(p => `<option value="${p.pair}">${p.pair} (${p.price})</option>`).join('');
         if (currentValue) alertPairSelect.value = currentValue;
-        pairsBody.innerHTML = pairs.map(p => `
-          <tr>
-            <td>${p.pair}</td>
-            <td style="text-align: right; font-weight: bold;">${p.price}</td>
+        
+        pairsBody.innerHTML = `
+          <tr style="background-color: #f0f0f0;">
+            <td colspan="2" style="text-align: center; padding: 8px; font-size: 0.9em;">
+              Market Status: ${statusIndicator}
+            </td>
           </tr>
-        `).join('');
+          ${pairs.map(p => `
+            <tr>
+              <td>${p.pair}</td>
+              <td style="text-align: right; font-weight: bold;">${p.price}</td>
+            </tr>
+          `).join('')}
+        `;
 
         // Display active alerts
         const alerts = data.alerts || {};

@@ -88,14 +88,26 @@ async def root():
 
 @router.get("/snapshot")
 async def snapshot():
-    """Get a single snapshot of current forex data."""
+    """Get a single snapshot of current forex data.
+    
+    Returns clean data format with only essential fields:
+    - market_status: "open" or "closed"
+    - pairs: currency pairs with prices
+    - ts: timestamp
+    """
     if not observer:
         logger.warning("Snapshot requested but observer not ready")
         return JSONResponse({"error": "Observer not ready"}, status_code=503)
     
     try:
         data = await observer.snapshot(MAJORS)
-        return JSONResponse(data)
+        # Return clean format without alerts
+        clean_data = {
+            "market_status": "open" if is_forex_market_open() else "closed",
+            "pairs": data.get("pairs", []),
+            "ts": data.get("ts")
+        }
+        return JSONResponse(clean_data)
     except Exception as e:
         logger.error(f"Error getting snapshot: {e}")
         return JSONResponse({"error": "Failed to get snapshot"}, status_code=500)
@@ -165,12 +177,22 @@ async def ws_observe(ws: WebSocket):
 
 
 def _attach_alerts(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Attach alert payloads to a data snapshot."""
-    data["alerts"] = {
-        "active": [a.to_dict() for a in alert_manager.get_active_alerts()],
-        "triggered": [a.to_dict() for a in alert_manager.get_all_alerts() if a.status == "triggered"],
+    """Clean and enrich snapshot data for WebSocket clients.
+    
+    Removes debug/metadata fields and adds market status indicator.
+    Keeps only essential fields: pair prices, timestamp, market status, and alerts.
+    """
+    # Build clean response - only essential fields for clients
+    clean_data = {
+        "market_status": "open" if is_forex_market_open() else "closed",
+        "pairs": data.get("pairs", []),
+        "ts": data.get("ts"),
+        "alerts": {
+            "active": [a.to_dict() for a in alert_manager.get_active_alerts()],
+            "triggered": [a.to_dict() for a in alert_manager.get_all_alerts() if a.status == "triggered"],
+        }
     }
-    return data
+    return clean_data
 
 
 async def data_streaming_task():
@@ -224,7 +246,7 @@ async def data_streaming_task():
                         queue.put_nowait(data.copy())
                     except asyncio.QueueFull:
                         # Queue is full, skip this subscriber
-                        logger.debug(f"Data subscriber queue full, skipping")
+                        logger.debug("Data subscriber queue full, skipping")
                         pass
             
             await asyncio.sleep(STREAM_INTERVAL)
