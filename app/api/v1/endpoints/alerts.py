@@ -30,12 +30,14 @@ async def create_alert(request: CreateAlertRequest):
     if request.condition not in ["above", "below", "equal"]:
         raise HTTPException(status_code=400, detail="Condition must be 'above', 'below', or 'equal'")
     
-    if request.channel not in ["email", "sms"]:
-        raise HTTPException(status_code=400, detail="Channel must be 'email' or 'sms'")
+    if request.channel not in ["email", "sms", "call"]:
+        raise HTTPException(status_code=400, detail="Channel must be 'email', 'sms', or 'call'")
     if request.channel == "email" and not request.email:
         raise HTTPException(status_code=400, detail="Email is required for email alerts")
     if request.channel == "sms" and not request.phone:
         raise HTTPException(status_code=400, detail="Phone is required for SMS alerts")
+    if request.channel == "call" and not request.phone:
+        raise HTTPException(status_code=400, detail="Phone is required for call alerts")
 
     alert = alert_manager.create_alert(
         pair=request.pair,

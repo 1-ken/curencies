@@ -30,6 +30,10 @@ FROM_EMAIL=verified-sender@example.com
 AFRICASTALKING_USERNAME=your-africastalking-username
 AFRICASTALKING_API_KEY=your-africastalking-api-key
 AFRICASTALKING_SENDER_ID=optional-sender-id
+TWILIO_ACCOUNT_SID=your-twilio-account-sid
+TWILIO_AUTH_TOKEN=your-twilio-auth-token
+TWILIO_FROM_NUMBER=your-twilio-from-number
+TWILIO_TO_NUMBER=optional-default-to-number
 ```
 
 ## Configuration

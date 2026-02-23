@@ -250,7 +250,7 @@
               "host": ["{{base_url}}", "api", "v1"],
               "path": ["alerts"]
             },
-            "description": "Create a new price alert. Supports email and SMS channels."
+            "description": "Create a new price alert. Supports email, SMS, and call channels."
           },
           "response": []
         },
@@ -281,6 +281,33 @@
           },
           "response": []
         },
+          {
+            "name": "Create Alert (Call)",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                },
+                {
+                  "key": "Accept",
+                  "value": "application/json"
+                }
+              ],
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"pair\": \"EURUSD\",\n  \"target_price\": 1.0900,\n  \"condition\": \"above\",\n  \"channel\": \"call\",\n  \"email\": \"\",\n  \"phone\": \"+1234567890\",\n  \"custom_message\": \"EUR/USD hit your target\"\n}"
+              },
+              "url": {
+                "raw": "{{api_base}}/alerts",
+                "host": ["{{base_url}}", "api", "v1"],
+                "path": ["alerts"]
+              },
+              "description": "Create a call price alert (requires Twilio credentials)"
+            },
+            "response": []
+          },
         {
           "name": "Get Specific Alert",
           "request": {

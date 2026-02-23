@@ -267,6 +267,7 @@ async def alert_monitoring_task():
     logger.info("Alert monitoring task started (with forex market hours restrictions)")
     
     # Dynamically import here to avoid circular imports
+    from app.services.call_service import CallService
     from app.services.email_service import EmailService
     from app.services.sms_service import SMSService
     
@@ -283,6 +284,17 @@ async def alert_monitoring_task():
             logger.info("SMS service available for alerts")
         except Exception as e:
             logger.error(f"Failed to initialize SMS service: {e}")
+
+    call_service = None
+    twilio_account_sid = os.getenv("TWILIO_ACCOUNT_SID")
+    twilio_auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+    twilio_from_number = os.getenv("TWILIO_FROM_NUMBER")
+    if twilio_account_sid and twilio_auth_token and twilio_from_number:
+        try:
+            call_service = CallService(twilio_account_sid, twilio_auth_token, twilio_from_number)
+            logger.info("Call service available for alerts")
+        except Exception as e:
+            logger.error(f"Failed to initialize call service: {e}")
     
     # Subscribe to data stream with larger queue to prevent dropping data
     data_queue = asyncio.Queue(maxsize=50)
@@ -304,7 +316,7 @@ async def alert_monitoring_task():
                 # Check price alerts
                 triggered_alerts = alert_manager.check_alerts(data.get("pairs", []))
                 if triggered_alerts:
-                    logger.warning(f"Triggered {len(triggered_alerts)} alert(s)")
+                    logger.warning("Triggered %s alert(s)", len(triggered_alerts))
                     for alert_data in triggered_alerts:
                         alert = alert_data["alert"]
                         current_price = alert_data["current_price"]
@@ -312,6 +324,15 @@ async def alert_monitoring_task():
                         
                         if channel == "sms" and sms_service and alert.get("phone"):
                             sms_service.send_price_alert(
+                                to_phone=alert["phone"],
+                                pair=alert["pair"],
+                                target_price=alert["target_price"],
+                                current_price=current_price,
+                                condition=alert["condition"],
+                                custom_message=alert.get("custom_message", ""),
+                            )
+                        elif channel == "call" and call_service and alert.get("phone"):
+                            call_service.send_price_alert(
                                 to_phone=alert["phone"],
                                 pair=alert["pair"],
                                 target_price=alert["target_price"],

@@ -8,7 +8,7 @@ class CreateAlertRequest(BaseModel):
     pair: str
     target_price: float
     condition: str  # "above", "below", or "equal"
-    channel: str = "email"  # "email" or "sms"
+    channel: str = "email"  # "email", "sms", or "call"
     email: str = ""
     phone: str = ""
     custom_message: str = ""  # Optional custom message for the alert
@@ -19,9 +19,9 @@ class CreateAlertRequest(BaseModel):
                 "pair": "EURUSD",
                 "target_price": 1.0850,
                 "condition": "above",
-                "channel": "email",
-                "email": "user@example.com",
-                "phone": "",
+                "channel": "call",
+                "email": "",
+                "phone": "+1234567890",
                 "custom_message": "Important threshold"
             }
         }

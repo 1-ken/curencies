@@ -73,6 +73,14 @@ if af_username and af_api_key:
 else:
     logger.warning("AFRICASTALKING credentials not set, SMS alerts disabled")
 
+twilio_account_sid = os.getenv("TWILIO_ACCOUNT_SID")
+twilio_auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+twilio_from_number = os.getenv("TWILIO_FROM_NUMBER")
+if twilio_account_sid and twilio_auth_token and twilio_from_number:
+    logger.info("Twilio call service initialized")
+else:
+    logger.warning("TWILIO credentials not set, call alerts disabled")
+
 
 @app.on_event("startup")
 async def on_startup():

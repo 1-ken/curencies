@@ -14,6 +14,8 @@ Edit `config.json`:
 - `majors`: Currencies to extract: USD, EUR, JPY, GBP, AUD, CAD, CHF, NZD.
 - `injectMutationObserver`: If true, records DOM mutation types in the payload.
 
+Alert provider environment variables (SendGrid, Africa's Talking, Twilio) are listed in `DEPLOYMENT.md`.
+
 Notes on selectors:
 - Table rows: `<tableSelector> tbody tr`
 - Pair cell (first column): `<tableSelector> tbody tr td:first-child`
