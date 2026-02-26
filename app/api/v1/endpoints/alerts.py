@@ -57,7 +57,7 @@ async def get_alerts():
     all_alerts = alert_manager.get_all_alerts()
     return {
         "total": len(all_alerts),
-        "active": [a.to_dict() for a in all_alerts if a.status == "active"],
+        "active": [a.to_dict() for a in alert_manager.get_active_alerts_sorted()],
         "triggered": [a.to_dict() for a in all_alerts if a.status == "triggered"],
         "all": [a.to_dict() for a in all_alerts],
     }

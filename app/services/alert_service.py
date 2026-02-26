@@ -106,9 +106,24 @@ class AlertManager:
         """Get all alerts."""
         return list(self.alerts.values())
 
+    def _sort_alerts_by_recency(self, alerts: List[Alert]) -> List[Alert]:
+        """Sort alerts by created_at (desc) and id (desc) for stable recency ordering."""
+        def sort_key(alert: Alert) -> tuple:
+            try:
+                created_at = datetime.fromisoformat(alert.created_at)
+            except (TypeError, ValueError):
+                created_at = datetime.min
+            return (created_at, alert.id)
+
+        return sorted(alerts, key=sort_key, reverse=True)
+
     def get_active_alerts(self) -> List[Alert]:
         """Get only active alerts."""
         return [a for a in self.alerts.values() if a.status == "active"]
+
+    def get_active_alerts_sorted(self) -> List[Alert]:
+        """Get active alerts ordered by most recent creation time."""
+        return self._sort_alerts_by_recency(self.get_active_alerts())
 
     def delete_alert(self, alert_id: str) -> bool:
         """Delete an alert."""
