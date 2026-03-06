@@ -55,6 +55,22 @@ class Config:
     @property
     def stream_interval_seconds(self) -> float:
         return float(self.get("streamIntervalSeconds", 1))
+
+    @property
+    def snapshot_timeout_seconds(self) -> float:
+        return float(os.getenv("SNAPSHOT_TIMEOUT_SECONDS", self.get("snapshotTimeoutSeconds", 8)))
+
+    @property
+    def ws_send_timeout_seconds(self) -> float:
+        return float(os.getenv("WS_SEND_TIMEOUT_SECONDS", self.get("wsSendTimeoutSeconds", 3)))
+
+    @property
+    def alert_action_timeout_seconds(self) -> float:
+        return float(os.getenv("ALERT_ACTION_TIMEOUT_SECONDS", self.get("alertActionTimeoutSeconds", 8)))
+
+    @property
+    def max_snapshot_failures(self) -> int:
+        return int(os.getenv("MAX_SNAPSHOT_FAILURES", self.get("maxSnapshotFailures", 4)))
     
     @property
     def majors(self) -> list:

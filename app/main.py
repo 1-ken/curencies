@@ -130,6 +130,12 @@ async def on_startup():
         data_endpoints.set_observer(observer)
         data_endpoints.set_alert_manager(alert_manager)
         data_endpoints.set_config(config.stream_interval_seconds, config.majors)
+        data_endpoints.set_runtime_tuning(
+            config.snapshot_timeout_seconds,
+            config.ws_send_timeout_seconds,
+            config.alert_action_timeout_seconds,
+            config.max_snapshot_failures,
+        )
         data_endpoints.set_redis_service(redis_service, config.redis_pubsub_enabled)
         data_endpoints.set_postgres_service(postgres_service)
         data_endpoints.set_archive_config(

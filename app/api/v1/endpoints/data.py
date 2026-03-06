@@ -35,6 +35,14 @@ MAJORS = []
 REDIS_PUBSUB_ENABLED = True
 ARCHIVE_INTERVAL = 30.0
 ARCHIVE_BATCH_SIZE = 200
+SNAPSHOT_TIMEOUT_SECONDS = 8.0
+WS_SEND_TIMEOUT_SECONDS = 3.0
+ALERT_ACTION_TIMEOUT_SECONDS = 8.0
+MAX_SNAPSHOT_FAILURES = 4
+
+snapshot_failure_count = 0
+last_snapshot_ts: Optional[str] = None
+_observer_restart_lock = asyncio.Lock()
 
 
 def set_observer(obs: SiteObserver):
@@ -74,6 +82,21 @@ def set_archive_config(interval_seconds: float, batch_size: int):
     global ARCHIVE_INTERVAL, ARCHIVE_BATCH_SIZE
     ARCHIVE_INTERVAL = interval_seconds
     ARCHIVE_BATCH_SIZE = batch_size
+
+
+def set_runtime_tuning(
+    snapshot_timeout_seconds: float,
+    ws_send_timeout_seconds: float,
+    alert_action_timeout_seconds: float,
+    max_snapshot_failures: int,
+):
+    """Set runtime resiliency tuning values."""
+    global SNAPSHOT_TIMEOUT_SECONDS, WS_SEND_TIMEOUT_SECONDS
+    global ALERT_ACTION_TIMEOUT_SECONDS, MAX_SNAPSHOT_FAILURES
+    SNAPSHOT_TIMEOUT_SECONDS = max(1.0, float(snapshot_timeout_seconds))
+    WS_SEND_TIMEOUT_SECONDS = max(0.5, float(ws_send_timeout_seconds))
+    ALERT_ACTION_TIMEOUT_SECONDS = max(1.0, float(alert_action_timeout_seconds))
+    MAX_SNAPSHOT_FAILURES = max(1, int(max_snapshot_failures))
 
 
 @router.get("/")
@@ -124,6 +147,42 @@ async def client_config():
     })
 
 
+@router.get("/stream-health")
+async def stream_health():
+    """Expose stream freshness and resilience counters."""
+    last_snapshot_age_seconds = None
+    if last_snapshot_ts:
+        try:
+            parsed = datetime.fromisoformat(last_snapshot_ts)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            last_snapshot_age_seconds = max(
+                0.0,
+                (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds(),
+            )
+        except Exception:
+            last_snapshot_age_seconds = None
+
+    status = "healthy"
+    if snapshot_failure_count > 0:
+        status = "degraded"
+    if last_snapshot_age_seconds is not None and last_snapshot_age_seconds > max(5.0, STREAM_INTERVAL * 6):
+        status = "stale"
+
+    return JSONResponse(
+        {
+            "status": status,
+            "stream_interval_seconds": STREAM_INTERVAL,
+            "snapshot_timeout_seconds": SNAPSHOT_TIMEOUT_SECONDS,
+            "max_snapshot_failures": MAX_SNAPSHOT_FAILURES,
+            "consecutive_snapshot_failures": snapshot_failure_count,
+            "last_snapshot_ts": last_snapshot_ts,
+            "last_snapshot_age_seconds": last_snapshot_age_seconds,
+            "subscriber_count": len(data_subscribers),
+        }
+    )
+
+
 @router.websocket("/ws/observe")
 async def ws_observe(ws: WebSocket):
     """WebSocket endpoint for streaming real-time forex data."""
@@ -141,7 +200,10 @@ async def ws_observe(ws: WebSocket):
             logger.info("WebSocket %s using Redis pub/sub stream", ws.client)
             async for data in redis_service.subscribe():
                 data = _attach_alerts(data)
-                await ws.send_json(data)
+                await asyncio.wait_for(
+                    ws.send_json(data),
+                    timeout=WS_SEND_TIMEOUT_SECONDS,
+                )
         else:
             # Subscribe to data stream
             data_queue = asyncio.Queue(maxsize=50)
@@ -156,7 +218,12 @@ async def ws_observe(ws: WebSocket):
                 # Get data from the central stream
                 data = await data_queue.get()
                 data = _attach_alerts(data)
-                await ws.send_json(data)
+                await asyncio.wait_for(
+                    ws.send_json(data),
+                    timeout=WS_SEND_TIMEOUT_SECONDS,
+                )
+    except asyncio.TimeoutError:
+        logger.warning("WebSocket %s send timeout; closing slow consumer", ws.client)
     except WebSocketDisconnect:
         logger.info(f"WebSocket connection closed: {ws.client}")
     except Exception as e:
@@ -195,13 +262,72 @@ def _attach_alerts(data: Dict[str, Any]) -> Dict[str, Any]:
     return clean_data
 
 
+def _queue_latest(queue: asyncio.Queue, data: Dict[str, Any]) -> None:
+    """Coalesce queue items to keep latest data for slow consumers."""
+    try:
+        queue.put_nowait(data)
+        return
+    except asyncio.QueueFull:
+        pass
+
+    try:
+        queue.get_nowait()
+    except asyncio.QueueEmpty:
+        pass
+
+    try:
+        queue.put_nowait(data)
+    except asyncio.QueueFull:
+        logger.debug("Subscriber queue remains full after coalescing")
+
+
+async def _restart_observer() -> bool:
+    """Restart observer safely to recover from prolonged snapshot stalls."""
+    global observer
+    if not observer:
+        return False
+
+    async with _observer_restart_lock:
+        logger.warning("Restarting observer due to repeated snapshot failures")
+        try:
+            await observer.shutdown()
+        except Exception as e:
+            logger.warning("Observer shutdown during restart failed: %s", e)
+
+        try:
+            await observer.startup()
+            logger.info("Observer restart completed")
+            return True
+        except Exception as e:
+            logger.error("Observer restart failed: %s", e)
+            return False
+
+
+async def _run_alert_action(func, **kwargs) -> bool:
+    """Run blocking alert action in thread with timeout guard."""
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(func, **kwargs),
+            timeout=ALERT_ACTION_TIMEOUT_SECONDS,
+        )
+        return True
+    except asyncio.TimeoutError:
+        logger.error(
+            "Alert action timed out after %.1fs; skipping",
+            ALERT_ACTION_TIMEOUT_SECONDS,
+        )
+    except Exception as e:
+        logger.error("Alert action failed: %s", e)
+    return False
+
+
 async def data_streaming_task():
     """Central task that continuously fetches market data and broadcasts to subscribers.
     
     Only broadcasts data when the forex market is open (24/5 operation).
     Market hours: Sunday 22:00 UTC - Friday 22:00 UTC
     """
-    global latest_data
+    global latest_data, snapshot_failure_count, last_snapshot_ts
     logger.info("Data streaming task started (with forex market hours restrictions)")
     
     market_closed_logged = False
@@ -229,8 +355,13 @@ async def data_streaming_task():
             
             if observer:
                 # Fetch current market data
-                data = await observer.snapshot(MAJORS)
+                data = await asyncio.wait_for(
+                    observer.snapshot(MAJORS),
+                    timeout=SNAPSHOT_TIMEOUT_SECONDS,
+                )
                 latest_data = data
+                last_snapshot_ts = data.get("ts")
+                snapshot_failure_count = 0
 
                 if redis_service:
                     try:
@@ -242,19 +373,32 @@ async def data_streaming_task():
                 # Make a copy of the list to avoid modification during iteration
                 current_subscribers = data_subscribers[:]
                 for queue in current_subscribers:
-                    try:
-                        queue.put_nowait(data.copy())
-                    except asyncio.QueueFull:
-                        # Queue is full, skip this subscriber
-                        logger.debug("Data subscriber queue full, skipping")
-                        pass
+                    _queue_latest(queue, data.copy())
             
             await asyncio.sleep(STREAM_INTERVAL)
         except asyncio.CancelledError:
             logger.info("Data streaming task cancelled")
             break
+        except asyncio.TimeoutError:
+            snapshot_failure_count += 1
+            logger.error(
+                "Snapshot timed out after %.1fs (failure %s/%s)",
+                SNAPSHOT_TIMEOUT_SECONDS,
+                snapshot_failure_count,
+                MAX_SNAPSHOT_FAILURES,
+            )
+            if snapshot_failure_count >= MAX_SNAPSHOT_FAILURES:
+                restarted = await _restart_observer()
+                if restarted:
+                    snapshot_failure_count = 0
+            await asyncio.sleep(STREAM_INTERVAL)
         except Exception as e:
+            snapshot_failure_count += 1
             logger.error(f"Error in data streaming task: {e}")
+            if snapshot_failure_count >= MAX_SNAPSHOT_FAILURES:
+                restarted = await _restart_observer()
+                if restarted:
+                    snapshot_failure_count = 0
             await asyncio.sleep(STREAM_INTERVAL)
 
 
@@ -314,7 +458,10 @@ async def alert_monitoring_task():
                 data = await asyncio.wait_for(data_queue.get(), timeout=5.0)
                 
                 # Check price alerts
-                triggered_alerts = alert_manager.check_alerts(data.get("pairs", []))
+                triggered_alerts = await asyncio.to_thread(
+                    alert_manager.check_alerts,
+                    data.get("pairs", []),
+                )
                 if triggered_alerts:
                     logger.warning("Triggered %s alert(s)", len(triggered_alerts))
                     for alert_data in triggered_alerts:
@@ -323,7 +470,8 @@ async def alert_monitoring_task():
                         channel = alert.get("channel", "email")
                         
                         if channel == "sms" and sms_service and alert.get("phone"):
-                            sms_service.send_price_alert(
+                            await _run_alert_action(
+                                sms_service.send_price_alert,
                                 to_phone=alert["phone"],
                                 pair=alert["pair"],
                                 target_price=alert["target_price"],
@@ -332,7 +480,8 @@ async def alert_monitoring_task():
                                 custom_message=alert.get("custom_message", ""),
                             )
                         elif channel == "call" and call_service and alert.get("phone"):
-                            call_service.send_price_alert(
+                            await _run_alert_action(
+                                call_service.send_price_alert,
                                 to_phone=alert["phone"],
                                 pair=alert["pair"],
                                 target_price=alert["target_price"],
@@ -341,7 +490,8 @@ async def alert_monitoring_task():
                                 custom_message=alert.get("custom_message", ""),
                             )
                         elif channel == "email" and email_service and alert.get("email"):
-                            email_service.send_price_alert(
+                            await _run_alert_action(
+                                email_service.send_price_alert,
                                 to_email=alert["email"],
                                 pair=alert["pair"],
                                 target_price=alert["target_price"],

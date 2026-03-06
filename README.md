@@ -11,8 +11,15 @@ Edit `config.json`:
 - `tableSelector`: CSS for the pairs table (e.g., `#pairs-table`, `.currency-pairs`).
 - `pairCellSelector`: Cells containing the pair text (usually first column: `tbody tr td:first-child`).
 - `streamIntervalSeconds`: Push interval for WebSocket.
+- `snapshotTimeoutSeconds`: Max seconds to wait for one market snapshot before counting a failure.
+- `maxSnapshotFailures`: Consecutive snapshot failures before observer auto-restart.
+- `wsSendTimeoutSeconds`: Max seconds allowed for one WebSocket send operation.
+- `alertActionTimeoutSeconds`: Max seconds for one alert delivery action (email/SMS/call).
 - `majors`: Currencies to extract: USD, EUR, JPY, GBP, AUD, CAD, CHF, NZD.
 - `injectMutationObserver`: If true, records DOM mutation types in the payload.
+
+Health endpoint:
+- `GET /stream-health`: Returns stream freshness (`last_snapshot_age_seconds`), subscriber count, and failure counters.
 
 Alert provider environment variables (SendGrid, Africa's Talking, Twilio) are listed in `DEPLOYMENT.md`.
 
