@@ -9,7 +9,13 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from playwright.async_api import async_playwright, Browser, Page
+from playwright.async_api import (
+    async_playwright,
+    Browser,
+    BrowserContext,
+    Page,
+    TimeoutError as PlaywrightTimeoutError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +37,104 @@ class SiteObserver:
 
         self._pw = None
         self.browser: Optional[Browser] = None
+        self.context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
+        
+        # Context recycling to prevent memory leaks
+        self.snapshot_count = 0
+        self.context_created_at: Optional[datetime] = None
+        self.CONTEXT_RESET_INTERVAL = 3600  # 1 hour in seconds
+        self.CONTEXT_RESET_SNAPSHOT_COUNT = 300  # Reset after 300 snapshots
+        self.NAVIGATION_TIMEOUT_MS = 15000
+        self.NAVIGATION_TIMEOUT_MAX_MS = 45000
+        self.NAVIGATION_RETRY_ATTEMPTS = 3
+        self._context_reset_lock = asyncio.Lock()
+        self._snapshot_lock = asyncio.Lock()
+        self._is_resetting_context = False
+
+    def _needs_context_reset(self) -> bool:
+        if not self.context_created_at:
+            return False
+        age_seconds = (datetime.now() - self.context_created_at).total_seconds()
+        return (
+            self.snapshot_count >= self.CONTEXT_RESET_SNAPSHOT_COUNT
+            or age_seconds >= self.CONTEXT_RESET_INTERVAL
+        )
+
+    async def _create_context_and_page(self) -> None:
+        if not self.browser:
+            raise RuntimeError("Browser not started")
+
+        self.context = await self.browser.new_context(
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+            locale="en-US",
+            viewport={"width": 1920, "height": 1080},
+            extra_http_headers={
+                "Accept-Language": "en-US,en;q=0.9",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            },
+        )
+        self.context_created_at = datetime.now()
+        await self.context.add_init_script(
+            """{
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            }"""
+        )
+        self.page = await self.context.new_page()
+        await self.page.route(
+            "**/*",
+            lambda route: (
+                route.abort()
+                if route.request.resource_type in {"image", "font", "media"}
+                else route.continue_()
+            ),
+        )
+
+    async def _navigate_with_retry(self) -> None:
+        if not self.page:
+            raise RuntimeError("Page not initialized")
+
+        timeout_ms = self.NAVIGATION_TIMEOUT_MS
+        for attempt in range(1, self.NAVIGATION_RETRY_ATTEMPTS + 1):
+            try:
+                await self.page.goto(
+                    self.url,
+                    wait_until="domcontentloaded",
+                    timeout=timeout_ms,
+                )
+                return
+            except PlaywrightTimeoutError as e:
+                if attempt >= self.NAVIGATION_RETRY_ATTEMPTS:
+                    raise
+                logger.warning(
+                    "Navigation timeout (%sms) on attempt %s/%s: %s; retrying",
+                    timeout_ms,
+                    attempt,
+                    self.NAVIGATION_RETRY_ATTEMPTS,
+                    e,
+                )
+                await asyncio.sleep(min(2 * attempt, 5))
+                timeout_ms = min(timeout_ms + 10000, self.NAVIGATION_TIMEOUT_MAX_MS)
+
+    async def _inject_mutation_observer_script(self) -> None:
+        if not self.inject_mutation_observer or not self.page:
+            return
+        await self.page.evaluate(
+            """
+            () => {
+                window.__changes = [];
+                const observer = new MutationObserver(mutations => {
+                    mutations.forEach(m => window.__changes.push(m.type));
+                });
+                observer.observe(document.body, { childList: true, subtree: true });
+                window.__observer = observer;
+            }
+            """
+        )
 
     async def startup(self) -> None:
         """Initialize the browser and navigate to the target URL."""
@@ -47,31 +150,8 @@ class SiteObserver:
                     '--disable-setuid-sandbox',
                 ]
             )
-            context = await self.browser.new_context(
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                ),
-                locale="en-US",
-                viewport={'width': 1920, 'height': 1080},
-                extra_http_headers={
-                    'Accept-Language': 'en-US,en;q=0.9',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                }
-            )
-            # Override navigator.webdriver flag
-            await context.add_init_script("""{
-                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-            }""")
-            self.page = await context.new_page()
-            # Block heavy assets, keep stylesheets and scripts
-            await self.page.route("**/*", lambda route: (
-                route.abort()
-                if route.request.resource_type in {"image", "font", "media"}
-                else route.continue_()
-            ))
-            await self.page.goto(self.url, wait_until="domcontentloaded")
+            await self._create_context_and_page()
+            await self._navigate_with_retry()
             
             # Check for and handle cookie consent popup (Yahoo Finance)
             await self._handle_cookie_consent()
@@ -106,26 +186,19 @@ class SiteObserver:
                         logger.error(f"Failed to get page content: {e4}")
             logger.info("Browser started successfully")
 
-            if self.inject_mutation_observer:
-                await self.page.evaluate(
-                    """
-                    () => {
-                        window.__changes = [];
-                        const observer = new MutationObserver(mutations => {
-                            mutations.forEach(m => window.__changes.push(m.type));
-                        });
-                        observer.observe(document.body, { childList: true, subtree: true });
-                        window.__observer = observer;
-                    }
-                    """
-                )
+            await self._inject_mutation_observer_script()
         except Exception as e:
             logger.error(f"Failed to start browser: {e}")
+            await self.shutdown()
             raise
 
     async def _handle_cookie_consent(self) -> None:
         """Handle cookie consent popup if it appears on page load."""
         if not self.page:
+            return
+        
+        # Skip if context is being recycled to avoid race conditions
+        if self._is_resetting_context:
             return
         
         try:
@@ -142,43 +215,114 @@ class SiteObserver:
             for selector in selectors:
                 try:
                     # Check if the button exists with a short timeout
-                    consent_button = await self.page.wait_for_selector(
-                        selector, 
-                        timeout=3000,
-                        state="visible"
-                    )
+                    # Wrap in try/except to handle context closure during wait
+                    try:
+                        consent_button = await self.page.wait_for_selector(
+                            selector, 
+                            timeout=1500,
+                            state="visible"
+                        )
+                    except Exception:
+                        # Selector not found or wait failed, skip this one
+                        continue
                     
                     if consent_button:
-                        logger.info(f"Cookie consent popup detected, clicking accept button: {selector}")
-                        await consent_button.click()
-                        # Wait a moment for the popup to disappear
-                        await self.page.wait_for_timeout(1000)
-                        logger.info("Cookie consent accepted successfully")
-                        return
+                        try:
+                            logger.info(f"Cookie consent popup detected, clicking accept button: {selector}")
+                            await consent_button.click()
+                            # Wait a moment for the popup to disappear
+                            await self.page.wait_for_timeout(500)
+                            logger.info("Cookie consent accepted successfully")
+                            return
+                        except Exception as e:
+                            logger.debug(f"Failed to click consent button: {e}")
+                            continue
                         
                 except Exception:
-                    # This selector didn't match, try the next one
+                    # Suppress error and try next selector
                     continue
             
             logger.debug("No cookie consent popup detected, continuing with normal flow")
             
         except Exception as e:
-            logger.warning(f"Error while handling cookie consent: {e}. Continuing anyway...")
+            logger.debug(f"Error while handling cookie consent: {e}. Continuing anyway...")
 
     async def shutdown(self) -> None:
         """Clean up browser resources."""
         logger.info("Shutting down browser")
         try:
+            if self.page:
+                await self.page.close()
+                self.page = None
+        except Exception as e:
+            if "has been closed" not in str(e):
+                logger.error(f"Error closing page: {e}")
+
+        try:
+            if self.context:
+                await self.context.close()
+                self.context = None
+        except Exception as e:
+            if "has been closed" not in str(e):
+                logger.error(f"Error closing context: {e}")
+
+        try:
             if self.browser:
                 await self.browser.close()
+                self.browser = None
         except Exception as e:
             logger.error(f"Error closing browser: {e}")
         finally:
             if self._pw:
                 try:
                     await self._pw.stop()
+                    self._pw = None
                 except Exception as e:
                     logger.error(f"Error stopping playwright: {e}")
+
+    async def _reset_context(self) -> None:
+        """Recycle browser context to prevent memory leaks from accumulated metadata/cache."""
+        async with self._context_reset_lock:
+            if not self._needs_context_reset():
+                return
+
+            self._is_resetting_context = True
+            try:
+                logger.info(
+                    "Recycling browser context (snapshot #%d or %.0fs old)",
+                    self.snapshot_count,
+                    (datetime.now() - self.context_created_at).total_seconds() if self.context_created_at else 0,
+                )
+
+                if self.page:
+                    try:
+                        await self.page.close()
+                    except Exception as e:
+                        logger.warning(f"Error closing page during context reset: {e}")
+                    finally:
+                        self.page = None
+
+                if self.context:
+                    try:
+                        await self.context.close()
+                    except Exception as e:
+                        logger.warning(f"Error closing context during context reset: {e}")
+                    finally:
+                        self.context = None
+
+                if self.browser:
+                    await self._create_context_and_page()
+                    await self._navigate_with_retry()
+                    await self._handle_cookie_consent()
+                    await self._inject_mutation_observer_script()
+
+                    self.snapshot_count = 0
+                    logger.info("Context recycled successfully")
+            except Exception as e:
+                logger.error(f"Failed to recycle context: {e}")
+                raise
+            finally:
+                self._is_resetting_context = False
 
     async def _extract_pair_cells_text(self) -> List[str]:
         if not self.page:
@@ -194,8 +338,8 @@ class SiteObserver:
         texts: List[str] = await self.page.evaluate(js)
         return texts
 
-    async def _extract_pairs_with_prices(self) -> List[Dict[str, str]]:
-        """Extract currency pairs with their current prices from the table."""
+    async def _extract_pairs_with_prices(self) -> List[Dict[str, Any]]:
+        """Extract currency pairs with current price and percentage change from the table."""
         if not self.page:
             return []
         js = f"""
@@ -209,14 +353,33 @@ class SiteObserver:
                 const priceText = cells[3]?.textContent.trim() || '';
                 // Extract just the price (first number before any +/- change)
                 const priceMatch = priceText.match(/^([\\d,\\.]+)/);
+
+                // Extract percentage change (e.g. +0.12%, -0.08%)
+                const changeCandidates = [
+                    cells[4]?.textContent || '',
+                    cells[5]?.textContent || '',
+                    priceText,
+                    row.textContent || '',
+                ];
+                let change = null;
+                for (const candidate of changeCandidates) {{
+                    const normalized = String(candidate).replace(/,/g, '');
+                    const pctMatch = normalized.match(/([+-]?\\d+(?:\\.\\d+)?)\\s*%/);
+                    if (pctMatch) {{
+                        change = pctMatch[1];
+                        break;
+                    }}
+                }}
+
                 return {{
                     pair: cells[1]?.textContent.trim() || '',
-                    price: priceMatch ? priceMatch[1] : priceText
+                    price: priceMatch ? priceMatch[1] : priceText,
+                    change,
                 }};
             }}).filter(item => item && item.pair && item.price);
         }})()
         """
-        pairs_data: List[Dict[str, str]] = await self.page.evaluate(js)
+        pairs_data: List[Dict[str, Any]] = await self.page.evaluate(js)
         return pairs_data
 
     @staticmethod
@@ -232,38 +395,41 @@ class SiteObserver:
         return sorted(found)
 
     async def snapshot(self, majors: List[str]) -> Dict[str, Any]:
-        if not self.page:
-            raise RuntimeError("Observer not started. Call startup() first.")
+        async with self._snapshot_lock:
+            if not self.page:
+                raise RuntimeError("Observer not started. Call startup() first.")
 
-        pairs_with_prices = await self._extract_pairs_with_prices()
-        if not pairs_with_prices:
-            # Extra logging to understand why stream is empty on VPS
-            try:
-                title = await self.page.title()
-                logger.warning(
-                    "Snapshot returned no pairs; page title=%s, url=%s", title, self.page.url
-                )
-            except Exception:
-                logger.warning("Snapshot returned no pairs and title fetch failed")
-        texts = [item["pair"] for item in pairs_with_prices]
-        majors_found = self._parse_majors_from_texts(texts, majors)
-        
-        # Filter pairs to only include those with majors
-        major_pairs = [
-            item for item in pairs_with_prices
-            if any(m.upper() in item["pair"].upper() for m in majors)
-        ]
-        
-        title = await self.page.title()
-        changes: List[str] = await self.page.evaluate("() => (window.__changes || []).splice(0)")
-        return {
-            "title": title,
-            "majors": majors_found,
-            "pairs": major_pairs,
-            "pairsSample": texts[:10],
-            "changes": changes,
-            "ts": datetime.now().isoformat(),
-        }
+            if self._needs_context_reset():
+                await self._reset_context()
+
+            pairs_with_prices = await self._extract_pairs_with_prices()
+            self.snapshot_count += 1
+            if not pairs_with_prices:
+                try:
+                    title = await self.page.title()
+                    logger.warning(
+                        "Snapshot returned no pairs; page title=%s, url=%s", title, self.page.url
+                    )
+                except Exception:
+                    logger.warning("Snapshot returned no pairs and title fetch failed")
+            texts = [item["pair"] for item in pairs_with_prices]
+            majors_found = self._parse_majors_from_texts(texts, majors)
+
+            major_pairs = [
+                item for item in pairs_with_prices
+                if any(m.upper() in item["pair"].upper() for m in majors)
+            ]
+
+            title = await self.page.title()
+            changes: List[str] = await self.page.evaluate("() => (window.__changes || []).splice(0)")
+            return {
+                "title": title,
+                "majors": majors_found,
+                "pairs": major_pairs,
+                "pairsSample": texts[:10],
+                "changes": changes,
+                "ts": datetime.now().isoformat(),
+            }
 
 
 async def observe_once_from_config(config_path: str) -> Dict[str, Any]:

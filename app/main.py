@@ -3,10 +3,12 @@ import asyncio
 import logging
 import os
 import time
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 from fastapi import FastAPI
-from fastapi.responses import RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from sqlalchemy import text
 
 from app.core.config import get_config
 from app.services.alert_service import AlertManager
@@ -127,8 +129,15 @@ async def on_startup():
             wait_selector=config.wait_selector,
             inject_mutation_observer=config.inject_mutation_observer,
         )
-        await observer.startup()
-        logger.info("Observer started successfully")
+        try:
+            await observer.startup()
+            logger.info("Observer started successfully")
+        except Exception as e:
+            logger.error(
+                "Observer initial startup failed (%s). "
+                "Starting API in degraded mode; background recovery will retry.",
+                e,
+            )
         
         # Set instances for endpoint handlers
         alerts_endpoints.set_alert_manager(alert_manager)
@@ -226,6 +235,575 @@ async def on_shutdown():
     
     logger.info("Finance Observer shutdown complete")
 
+
+# ─── Liveness & readiness health endpoint ───────────────────────────────────
+
+_app_start_time: float = time.monotonic()
+
+@app.get("/health", tags=["monitoring"])
+async def health_check():
+    """Comprehensive liveness probe.
+
+    Returns 200 + status="ok" when all subsystems are healthy.
+    Returns 503 + status="degraded" when non-critical components are unavailable.
+    Returns 503 + status="down"    when the observer or stream is broken.
+    """
+    checks: dict = {}
+    overall = "ok"
+
+    # 1. Process uptime
+    checks["uptime_seconds"] = round(time.monotonic() - _app_start_time, 1)
+
+    # 2. Observer / browser
+    obs_ready = observer is not None and observer.browser is not None and observer.page is not None
+    checks["observer"] = "up" if obs_ready else "down"
+    if not obs_ready:
+        overall = "down"
+
+    # 3. Background tasks
+    checks["stream_task"] = (
+        "up" if data_stream_task and not data_stream_task.done() else "down"
+    )
+    checks["alert_task"] = (
+        "up" if background_task and not background_task.done() else "down"
+    )
+    if checks["stream_task"] == "down":
+        overall = "down"
+
+    # 4. Redis ping (non-blocking, 1 s timeout)
+    if redis_service and redis_service._client:
+        try:
+            await asyncio.wait_for(redis_service._client.ping(), timeout=1.0)
+            checks["redis"] = "up"
+        except Exception as e:
+            checks["redis"] = f"error: {e}"
+            if overall == "ok":
+                overall = "degraded"
+    else:
+        checks["redis"] = "unavailable"
+        if overall == "ok":
+            overall = "degraded"
+
+    # 5. PostgreSQL ping (non-blocking, 1 s timeout)
+    if postgres_service and postgres_service._engine:
+        try:
+            async def _pg_ping():
+                async with postgres_service._engine.connect() as conn:
+                    await conn.execute(text("SELECT 1"))
+            await asyncio.wait_for(_pg_ping(), timeout=1.0)
+            checks["postgres"] = "up"
+        except Exception as e:
+            checks["postgres"] = f"error: {e}"
+            if overall == "ok":
+                overall = "degraded"
+    else:
+        checks["postgres"] = "unavailable"
+        if overall == "ok":
+            overall = "degraded"
+
+    # 6. Stream health snapshot
+    stream_failures = getattr(data_endpoints, "snapshot_failure_count", None)
+    last_ts = getattr(data_endpoints, "last_snapshot_ts", None)
+    checks["stream_failures"] = stream_failures
+    checks["last_snapshot_ts"] = last_ts
+    if stream_failures is not None and stream_failures >= getattr(data_endpoints, "MAX_SNAPSHOT_FAILURES", 4):
+        overall = "down"
+
+    status_code = 200 if overall == "ok" else 503
+    return JSONResponse(
+        {
+            "status": overall,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "checks": checks,
+        },
+        status_code=status_code,
+    )
+
+
+@app.get("/ping", tags=["monitoring"])
+async def ping():
+    """Minimal TCP-level liveness probe — always returns 200 if the process is alive."""
+    return JSONResponse({"pong": True})
+
+
+# ─── Live monitoring dashboard ────────────────────────────────────────────────
+
+_DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Finance Observer — Live Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0f1117; --surface: #1a1d27; --border: #2a2d3e;
+    --text: #e2e8f0; --muted: #94a3b8;
+    --green: #22c55e; --yellow: #f59e0b; --red: #ef4444;
+    --blue: #3b82f6; --purple: #a855f7;
+    --chart-h: 220px;
+  }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif;
+    font-size: 14px; min-height: 100vh; }
+
+  /* ── Banner ── */
+  #banner {
+    padding: 14px 24px; font-weight: 700; font-size: 15px;
+    display: flex; align-items: center; gap: 10px;
+    transition: background 0.4s;
+  }
+  #banner .dot { width: 10px; height: 10px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
+  #banner.ok   { background: #052e16; color: var(--green); }
+  #banner.degraded { background: #1c1003; color: var(--yellow); }
+  #banner.down { background: #1f0202; color: var(--red); }
+  #banner.loading { background: var(--surface); color: var(--muted); }
+
+  /* ── Layout ── */
+  .container { max-width: 1280px; margin: 0 auto; padding: 24px 20px; }
+  h1 { font-size: 20px; font-weight: 600; margin-bottom: 20px; letter-spacing: -0.3px; }
+
+  /* ── Status grid ── */
+  .status-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 12px; margin-bottom: 28px;
+  }
+  .status-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px 16px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .status-card .label { font-size: 11px; text-transform: uppercase;
+    letter-spacing: 0.08em; color: var(--muted); font-weight: 600; }
+  .status-card .value { font-size: 18px; font-weight: 700; }
+  .status-card .pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 12px; font-weight: 600; padding: 2px 8px;
+    border-radius: 999px; width: fit-content;
+  }
+  .pill.up   { background: #052e164f; color: var(--green); }
+  .pill.down { background: #1f02024f; color: var(--red); }
+  .pill.degraded { background: #1c10034f; color: var(--yellow); }
+
+  /* ── Charts ── */
+  .charts-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+    gap: 16px; margin-bottom: 20px;
+  }
+  .chart-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px;
+  }
+  .chart-card h3 { font-size: 13px; font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 12px; }
+  .chart-wrap { height: var(--chart-h); position: relative; }
+
+  /* ── Pairs table ── */
+  .pairs-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px; margin-bottom: 20px;
+  }
+  .pairs-card h3 { font-size: 13px; font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 12px; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-size: 11px; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.08em;
+    padding: 6px 10px; border-bottom: 1px solid var(--border); }
+  td { padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 13px; }
+  tr:last-child td { border-bottom: none; }
+  .up-pct   { color: var(--green); font-weight: 600; }
+  .down-pct { color: var(--red);   font-weight: 600; }
+
+  /* ── Footer ── */
+  .footer { font-size: 11px; color: var(--muted); text-align: center;
+    padding-top: 12px; display: flex; gap: 20px; justify-content: center; }
+  .footer span { display: flex; align-items: center; gap: 4px; }
+  #last-updated { }
+</style>
+</head>
+<body>
+
+<div id="banner" class="loading">
+  <span class="dot"></span>
+  <span id="banner-text">Connecting…</span>
+</div>
+
+<div class="container">
+  <h1>Finance Observer — Live Dashboard</h1>
+
+  <!-- ── Status cards ── -->
+  <div class="status-grid">
+    <div class="status-card">
+      <span class="label">Overall</span>
+      <span id="c-status" class="value">—</span>
+    </div>
+    <div class="status-card">
+      <span class="label">Observer</span>
+      <span id="c-observer" class="pill">—</span>
+    </div>
+    <div class="status-card">
+      <span class="label">Stream Task</span>
+      <span id="c-stream-task" class="pill">—</span>
+    </div>
+    <div class="status-card">
+      <span class="label">Alert Task</span>
+      <span id="c-alert-task" class="pill">—</span>
+    </div>
+    <div class="status-card">
+      <span class="label">Redis</span>
+      <span id="c-redis" class="pill">—</span>
+    </div>
+    <div class="status-card">
+      <span class="label">PostgreSQL</span>
+      <span id="c-postgres" class="pill">—</span>
+    </div>
+    <div class="status-card">
+      <span class="label">Uptime</span>
+      <span id="c-uptime" class="value">—</span>
+    </div>
+    <div class="status-card">
+      <span class="label">WS Subscribers</span>
+      <span id="c-subscribers" class="value">—</span>
+    </div>
+    <div class="status-card">
+      <span class="label">Stream Failures</span>
+      <span id="c-failures" class="value">—</span>
+    </div>
+    <div class="status-card">
+      <span class="label">Snapshot Age</span>
+      <span id="c-age" class="value">—</span>
+    </div>
+  </div>
+
+  <!-- ── Charts ── -->
+  <div class="charts-grid">
+    <div class="chart-card">
+      <h3>Snapshot Age (seconds)</h3>
+      <div class="chart-wrap"><canvas id="chart-age"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>Consecutive Failures</h3>
+      <div class="chart-wrap"><canvas id="chart-failures"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>WebSocket Subscribers</h3>
+      <div class="chart-wrap"><canvas id="chart-subs"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>Subscribers: Live vs Persisted</h3>
+      <div class="chart-wrap"><canvas id="chart-subs-persisted"></canvas></div>
+    </div>
+  </div>
+
+  <!-- ── FX Pairs table ── -->
+  <div class="pairs-card">
+    <h3>Latest FX Snapshot</h3>
+    <table>
+      <thead><tr><th>Pair</th><th>Price</th><th>Change %</th></tr></thead>
+      <tbody id="pairs-tbody"><tr><td colspan="3" style="color:var(--muted)">Waiting for snapshot…</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="footer">
+    <span>Auto-refresh: <strong>5 s</strong></span>
+    <span>Last updated: <strong id="last-updated">—</strong></span>
+  </div>
+</div>
+
+<script>
+const POINTS = 60;  // rolling window (60 × 5 s = 5 min)
+const POLL_MS = 5000;
+
+// ── Chart defaults ──────────────────────────────────────────────────────────
+Chart.defaults.color = '#94a3b8';
+Chart.defaults.borderColor = '#2a2d3e';
+
+function makeChart(id, label, color, yMin) {
+  const ctx = document.getElementById(id).getContext('2d');
+  return new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: [{
+        label,
+        data: [],
+        borderColor: color,
+        backgroundColor: color + '1a',
+        borderWidth: 2,
+        pointRadius: 2,
+        pointHoverRadius: 4,
+        fill: true,
+        tension: 0.35,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      animation: { duration: 300 },
+      plugins: { legend: { display: false } },
+      scales: {
+        x: {
+          ticks: { maxTicksLimit: 6, maxRotation: 0, font: { size: 10 } },
+          grid: { display: false },
+        },
+        y: {
+          min: yMin !== undefined ? yMin : undefined,
+          ticks: { font: { size: 10 } },
+          grid: { color: '#2a2d3e' },
+        }
+      }
+    }
+  });
+}
+
+const chartAge  = makeChart('chart-age',      'Age (s)',    '#f59e0b', 0);
+const chartFail = makeChart('chart-failures', 'Failures',   '#ef4444', 0);
+const chartSubs = makeChart('chart-subs',     'Subscribers','#3b82f6', 0);
+const chartSubsPersisted = new Chart(document.getElementById('chart-subs-persisted').getContext('2d'), {
+  type: 'line',
+  data: {
+    datasets: [
+      {
+        label: 'Live',
+        data: [],
+        borderColor: '#3b82f6',
+        backgroundColor: '#3b82f61a',
+        borderWidth: 2,
+        pointRadius: 2,
+        pointHoverRadius: 4,
+        tension: 0.25,
+      },
+      {
+        label: 'Persisted',
+        data: [],
+        borderColor: '#a855f7',
+        backgroundColor: '#a855f71a',
+        borderWidth: 2,
+        pointRadius: 2,
+        pointHoverRadius: 4,
+        tension: 0.25,
+      }
+    ]
+  },
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: { duration: 300 },
+    plugins: { legend: { display: true } },
+    parsing: false,
+    scales: {
+      x: {
+        type: 'linear',
+        ticks: {
+          maxTicksLimit: 6,
+          callback: (v) => {
+            const d = new Date(Number(v));
+            return d.getHours().toString().padStart(2, '0') + ':' +
+                   d.getMinutes().toString().padStart(2, '0') + ':' +
+                   d.getSeconds().toString().padStart(2, '0');
+          },
+          font: { size: 10 },
+        },
+        grid: { display: false },
+      },
+      y: {
+        min: 0,
+        ticks: { font: { size: 10 } },
+        grid: { color: '#2a2d3e' },
+      }
+    }
+  }
+});
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+function push(chart, label, value) {
+  chart.data.labels.push(label);
+  chart.data.datasets[0].data.push(value);
+  if (chart.data.labels.length > POINTS) {
+    chart.data.labels.shift();
+    chart.data.datasets[0].data.shift();
+  }
+  chart.update('none');
+}
+
+function pushTsPoint(dataset, tsMs, value, maxPoints) {
+  dataset.push({ x: tsMs, y: value });
+  if (dataset.length > maxPoints) {
+    dataset.shift();
+  }
+}
+
+function timeLabel() {
+  const d = new Date();
+  return d.getHours().toString().padStart(2,'0') + ':' +
+         d.getMinutes().toString().padStart(2,'0') + ':' +
+         d.getSeconds().toString().padStart(2,'0');
+}
+
+function pill(el, state) {
+  el.className = 'pill ' + (state === 'up' ? 'up' : state === 'down' ? 'down' : 'degraded');
+  el.textContent = state;
+}
+
+function fmtUptime(s) {
+  if (s == null) return '—';
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = Math.floor(s % 60);
+  if (h > 0) return h + 'h ' + m + 'm';
+  if (m > 0) return m + 'm ' + sec + 's';
+  return sec + 's';
+}
+
+// ── Banner ───────────────────────────────────────────────────────────────────
+function setBanner(status) {
+  const banner = document.getElementById('banner');
+  const text   = document.getElementById('banner-text');
+  banner.className = 'loading';
+  if (status === 'ok')       { banner.className = 'ok';       text.textContent = 'All systems operational'; }
+  else if (status === 'degraded') { banner.className = 'degraded'; text.textContent = 'Degraded — some components unavailable'; }
+  else if (status === 'down') { banner.className = 'down';    text.textContent = 'Down — observer or stream not running'; }
+  else                        { banner.className = 'loading'; text.textContent = 'Connecting…'; }
+}
+
+// ── Fetch loop ────────────────────────────────────────────────────────────────
+async function poll() {
+  const ts = timeLabel();
+  const tsMs = Date.now();
+
+  try {
+    const [hRes, sRes] = await Promise.all([
+      fetch('/health'),
+      fetch('/stream-health')
+    ]);
+
+    const h = await hRes.json();
+    const s = await sRes.json();
+    const c = h.checks || {};
+
+    // Banner
+    setBanner(h.status);
+
+    // Status cards
+    document.getElementById('c-status').textContent = h.status || '—';
+    document.getElementById('c-status').style.color =
+      h.status === 'ok' ? 'var(--green)' : h.status === 'degraded' ? 'var(--yellow)' : 'var(--red)';
+
+    pill(document.getElementById('c-observer'),    c.observer    || 'down');
+    pill(document.getElementById('c-stream-task'), c.stream_task || 'down');
+    pill(document.getElementById('c-alert-task'),  c.alert_task  || 'down');
+
+    const redisSt = (c.redis || 'down').startsWith('up') ? 'up' : (c.redis || '').startsWith('error') ? 'down' : 'down';
+    pill(document.getElementById('c-redis'),    redisSt);
+    const pgSt = (c.postgres || 'down').startsWith('up') ? 'up' : (c.postgres || '').startsWith('error') ? 'down' : 'down';
+    pill(document.getElementById('c-postgres'), pgSt);
+
+    document.getElementById('c-uptime').textContent = fmtUptime(c.uptime_seconds);
+
+    // Stream-health fields
+    const age   = s.last_snapshot_age_seconds;
+    const fails = s.consecutive_snapshot_failures;
+    const subs  = s.subscriber_count;
+
+    document.getElementById('c-subscribers').textContent = subs != null ? subs : '—';
+    document.getElementById('c-failures').textContent    = fails != null ? fails : '—';
+    document.getElementById('c-age').textContent         = age   != null ? age.toFixed(1) + ' s' : '—';
+
+    // Charts
+    push(chartAge,  ts, age   != null ? parseFloat(age.toFixed(2))  : null);
+    push(chartFail, ts, fails != null ? fails : null);
+    push(chartSubs, ts, subs  != null ? subs  : null);
+
+    pushTsPoint(chartSubsPersisted.data.datasets[0].data, tsMs, subs != null ? subs : 0, POINTS);
+    chartSubsPersisted.update('none');
+
+    document.getElementById('last-updated').textContent = ts;
+
+  } catch (err) {
+    setBanner(null);
+    console.warn('Poll error:', err);
+  }
+
+  // FX pairs: hit /snapshot (best-effort, skip on error)
+  try {
+    const snap = await fetch('/snapshot');
+    if (snap.ok) {
+      const payload = await snap.json();
+      renderPairs(payload);
+    }
+  } catch (_) {}
+
+  // Persisted metrics trend (best-effort)
+  try {
+    const hist = await fetch('/historical/stream-metrics?limit=60&order=desc');
+    if (hist.ok) {
+      const payload = await hist.json();
+      renderPersistedSubscriberTrend(payload);
+    }
+  } catch (_) {}
+}
+
+function renderPairs(data) {
+  const tbody = document.getElementById('pairs-tbody');
+  if (!data || typeof data !== 'object') {
+    tbody.innerHTML = '<tr><td colspan="3" style="color:var(--muted)">No data</td></tr>';
+    return;
+  }
+
+  const rows = Array.isArray(data.pairs) ? data.pairs : [];
+  if (rows.length === 0) {
+    const msg = data.error ? 'No fresh snapshot: ' + data.error : 'No pair rows in snapshot';
+    tbody.innerHTML = '<tr><td colspan="3" style="color:var(--muted)">' + msg + '</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = rows.map((info) => {
+    const pair = info.pair || '—';
+    const price  = info.price  != null ? parseFloat(info.price).toFixed(5)  : '—';
+    const change = info.change != null ? parseFloat(info.change) : null;
+    const chgCell = change == null ? '<td>—</td>'
+      : change >= 0
+        ? '<td class="up-pct">+' + change.toFixed(3) + '%</td>'
+        : '<td class="down-pct">' + change.toFixed(3) + '%</td>';
+    return '<tr><td>' + pair + '</td><td>' + price + '</td>' + chgCell + '</tr>';
+  }).join('');
+}
+
+function renderPersistedSubscriberTrend(payload) {
+  if (!payload || !Array.isArray(payload.items)) {
+    return;
+  }
+
+  const points = payload.items
+    .slice()
+    .reverse()
+    .map((item) => {
+      const x = new Date(item.observed_at).getTime();
+      const y = Number(item.ws_subscriber_count ?? 0);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) {
+        return null;
+      }
+      return { x, y };
+    })
+    .filter(Boolean);
+
+  chartSubsPersisted.data.datasets[1].data = points;
+  chartSubsPersisted.update('none');
+}
+
+// ── Boot ──────────────────────────────────────────────────────────────────────
+poll();
+setInterval(poll, POLL_MS);
+</script>
+</body>
+</html>"""
+
+
+@app.get("/dashboard", response_class=HTMLResponse, tags=["monitoring"])
+async def dashboard():
+    """Live monitoring dashboard — auto-refreshing line graphs for all subsystems."""
+    return HTMLResponse(content=_DASHBOARD_HTML)
+
+
+# ─── API routers ──────────────────────────────────────────────────────────────
 
 # Include API routers
 app.include_router(api_v1.router)

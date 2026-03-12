@@ -9,7 +9,7 @@ from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
-from app.models import Base, HistoricalPrice
+from app.models import Base, HistoricalPrice, StreamMetric
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +99,55 @@ class PostgresService:
             result = await session.execute(stmt)
             return list(result.scalars().all())
 
+    async def insert_stream_metric(
+        self,
+        *,
+        observed_at: datetime,
+        ws_subscriber_count: int,
+        queue_subscriber_count: int,
+        snapshot_failure_count: int,
+        stream_status: str,
+    ) -> None:
+        if not self._sessionmaker:
+            raise RuntimeError("PostgreSQL session not initialized")
+
+        row = StreamMetric(
+            observed_at=observed_at,
+            ws_subscriber_count=max(0, int(ws_subscriber_count)),
+            queue_subscriber_count=max(0, int(queue_subscriber_count)),
+            snapshot_failure_count=max(0, int(snapshot_failure_count)),
+            stream_status=(stream_status or "healthy")[:32],
+        )
+
+        async with self._sessionmaker() as session:
+            session.add(row)
+            await session.commit()
+
+    async def query_stream_metrics(
+        self,
+        start: Optional[datetime],
+        end: Optional[datetime],
+        limit: int,
+        descending: bool,
+    ) -> List[StreamMetric]:
+        if not self._sessionmaker:
+            raise RuntimeError("PostgreSQL session not initialized")
+
+        stmt = select(StreamMetric)
+        if start:
+            stmt = stmt.where(StreamMetric.observed_at >= start)
+        if end:
+            stmt = stmt.where(StreamMetric.observed_at <= end)
+        if descending:
+            stmt = stmt.order_by(StreamMetric.observed_at.desc())
+        else:
+            stmt = stmt.order_by(StreamMetric.observed_at.asc())
+        stmt = stmt.limit(limit)
+
+        async with self._sessionmaker() as session:
+            result = await session.execute(stmt)
+            return list(result.scalars().all())
+
     async def query_ohlc(
         self,
         pair: str,
@@ -139,6 +188,7 @@ class PostgresService:
         pg_interval = interval_map[interval]
         
         # Build SQL query for OHLC aggregation
+        # Use CAST to handle NULL parameters with explicit types
         query = text("""
             WITH candles AS (
                 SELECT
@@ -150,8 +200,8 @@ class PostgresService:
                     COUNT(*) AS volume
                 FROM historical_prices
                 WHERE pair = :pair
-                    AND (:start IS NULL OR observed_at >= :start)
-                    AND (:end IS NULL OR observed_at <= :end)
+                    AND (CAST(:start AS TIMESTAMP) IS NULL OR observed_at >= CAST(:start AS TIMESTAMP))
+                    AND (CAST(:end AS TIMESTAMP) IS NULL OR observed_at <= CAST(:end AS TIMESTAMP))
                 GROUP BY bucket
                 ORDER BY bucket DESC
                 LIMIT :limit

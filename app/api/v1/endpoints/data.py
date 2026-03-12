@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import os
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -39,10 +40,39 @@ SNAPSHOT_TIMEOUT_SECONDS = 8.0
 WS_SEND_TIMEOUT_SECONDS = 3.0
 ALERT_ACTION_TIMEOUT_SECONDS = 8.0
 MAX_SNAPSHOT_FAILURES = 4
+METRICS_PERSIST_INTERVAL_SECONDS = 30.0
 
 snapshot_failure_count = 0
 last_snapshot_ts: Optional[str] = None
 _observer_restart_lock = asyncio.Lock()
+_active_ws_connections = 0
+_last_metrics_persist_at = 0.0
+
+
+def _get_active_subscriber_count() -> int:
+    return max(0, _active_ws_connections)
+
+
+async def _persist_stream_metric_if_due(status: str) -> None:
+    global _last_metrics_persist_at
+    if not postgres_service:
+        return
+
+    now = time.monotonic()
+    if now - _last_metrics_persist_at < METRICS_PERSIST_INTERVAL_SECONDS:
+        return
+
+    try:
+        await postgres_service.insert_stream_metric(
+            observed_at=datetime.now(timezone.utc),
+            ws_subscriber_count=_get_active_subscriber_count(),
+            queue_subscriber_count=len(data_subscribers),
+            snapshot_failure_count=snapshot_failure_count,
+            stream_status=status,
+        )
+        _last_metrics_persist_at = now
+    except Exception as e:
+        logger.error("Failed to persist stream metrics: %s", e)
 
 
 def set_observer(obs: SiteObserver):
@@ -111,6 +141,27 @@ async def snapshot():
     if not observer:
         logger.warning("Snapshot requested but observer not ready")
         return JSONResponse({"error": "Observer not ready"}, status_code=503)
+
+    # Prefer fresh streamed cache to avoid extra Playwright reads from dashboard polling.
+    # This reduces contention with the central data stream task.
+    cached_pairs = (latest_data or {}).get("pairs") or []
+    cached_ts = (latest_data or {}).get("ts")
+    if cached_pairs and cached_ts:
+        try:
+            parsed = datetime.fromisoformat(cached_ts)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            age_seconds = (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()
+            if age_seconds <= max(5.0, STREAM_INTERVAL * 3):
+                return JSONResponse(
+                    {
+                        "market_status": "open" if is_forex_market_open() else "closed",
+                        "pairs": cached_pairs,
+                        "ts": cached_ts,
+                    }
+                )
+        except Exception:
+            pass
     
     try:
         data = await asyncio.wait_for(
@@ -186,7 +237,9 @@ async def stream_health():
             "consecutive_snapshot_failures": snapshot_failure_count,
             "last_snapshot_ts": last_snapshot_ts,
             "last_snapshot_age_seconds": last_snapshot_age_seconds,
-            "subscriber_count": len(data_subscribers),
+            "subscriber_count": _get_active_subscriber_count(),
+            "ws_subscriber_count": _get_active_subscriber_count(),
+            "queue_subscriber_count": len(data_subscribers),
         }
     )
 
@@ -194,14 +247,23 @@ async def stream_health():
 @router.websocket("/ws/observe")
 async def ws_observe(ws: WebSocket):
     """WebSocket endpoint for streaming real-time forex data."""
+    global _active_ws_connections
     await ws.accept()
-    logger.info(f"WebSocket connection established: {ws.client} (total subscribers: {len(data_subscribers) + 1})")
+    connection_counted = False
     
     if not observer:
         logger.warning("WebSocket connection but observer not ready")
         await ws.send_json({"error": "Observer not ready"})
         await ws.close()
         return
+
+    _active_ws_connections += 1
+    connection_counted = True
+    logger.info(
+        "WebSocket connection established: %s (active subscribers: %s)",
+        ws.client,
+        _get_active_subscriber_count(),
+    )
 
     stop_event = asyncio.Event()
     disconnect_watcher = asyncio.create_task(_watch_ws_disconnect(ws, stop_event))
@@ -262,6 +324,14 @@ async def ws_observe(ws: WebSocket):
                     ws.client,
                     len(data_subscribers),
                 )
+
+        if connection_counted:
+            _active_ws_connections = max(0, _active_ws_connections - 1)
+            logger.info(
+                "WebSocket disconnected: %s (active subscribers: %s)",
+                ws.client,
+                _get_active_subscriber_count(),
+            )
         try:
             await ws.close()
         except Exception:
@@ -383,6 +453,8 @@ async def data_streaming_task():
                         f"Market opens in: {time_until_open}"
                     )
                     market_closed_logged = True
+
+                await _persist_stream_metric_if_due("market_closed")
                 
                 # Sleep for a longer interval when market is closed (check every 5 minutes)
                 await asyncio.sleep(300)
@@ -418,6 +490,8 @@ async def data_streaming_task():
                 current_subscribers = data_subscribers[:]
                 for queue in current_subscribers:
                     _queue_latest(queue, data.copy())
+
+                await _persist_stream_metric_if_due("healthy")
             
             await asyncio.sleep(STREAM_INTERVAL)
         except asyncio.CancelledError:
@@ -435,6 +509,7 @@ async def data_streaming_task():
                 restarted = await _restart_observer()
                 if restarted:
                     snapshot_failure_count = 0
+            await _persist_stream_metric_if_due("degraded")
             await asyncio.sleep(STREAM_INTERVAL)
         except Exception as e:
             snapshot_failure_count += 1
@@ -443,6 +518,7 @@ async def data_streaming_task():
                 restarted = await _restart_observer()
                 if restarted:
                     snapshot_failure_count = 0
+            await _persist_stream_metric_if_due("degraded")
             await asyncio.sleep(STREAM_INTERVAL)
 
 
@@ -710,6 +786,42 @@ async def historical_ohlc(
     except Exception as e:
         logger.error(f"Error querying OHLC data: {e}")
         return JSONResponse({"error": "Failed to query OHLC data"}, status_code=500)
+
+
+@router.get("/historical/stream-metrics")
+async def historical_stream_metrics(
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    limit: int = 1000,
+    order: str = "desc",
+):
+    """Query persisted stream metrics (subscriber count, failures, stream status)."""
+    if not postgres_service:
+        return JSONResponse({"error": "Historical storage not available"}, status_code=503)
+
+    start_dt = _parse_query_datetime(start)
+    end_dt = _parse_query_datetime(end)
+    descending = order.lower() != "asc"
+    limit = max(1, min(limit, 5000))
+
+    rows = await postgres_service.query_stream_metrics(
+        start=start_dt,
+        end=end_dt,
+        limit=limit,
+        descending=descending,
+    )
+
+    items = [
+        {
+            "observed_at": row.observed_at.isoformat(),
+            "ws_subscriber_count": row.ws_subscriber_count,
+            "queue_subscriber_count": row.queue_subscriber_count,
+            "snapshot_failure_count": row.snapshot_failure_count,
+            "stream_status": row.stream_status,
+        }
+        for row in rows
+    ]
+    return JSONResponse({"count": len(items), "items": items})
 
 
 def _parse_query_datetime(value: Optional[str]) -> Optional[datetime]:
