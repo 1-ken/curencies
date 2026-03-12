@@ -80,7 +80,6 @@ sudo systemctl start finance-observer
 
 ## API Endpoints
 
-- `GET /` - Web interface
 - `GET /snapshot` - Single data snapshot (JSON)
 - `WS /ws/observe` - Live data stream (WebSocket)
 

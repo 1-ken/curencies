@@ -97,6 +97,11 @@ async def on_startup():
             queue_key=config.redis_queue_key,
             recent_key=config.redis_recent_key,
             recent_maxlen=config.redis_recent_maxlen,
+            socket_connect_timeout_seconds=config.redis_socket_connect_timeout_seconds,
+            socket_timeout_seconds=config.redis_socket_timeout_seconds,
+            retry_max_attempts=config.redis_retry_max_attempts,
+            retry_base_delay_seconds=config.redis_retry_base_delay_seconds,
+            retry_max_delay_seconds=config.redis_retry_max_delay_seconds,
         )
         try:
             await redis_service.connect()
@@ -225,7 +230,7 @@ async def on_shutdown():
 # Include API routers
 app.include_router(api_v1.router)
 
-# Add data endpoints at root level (for /, /snapshot, /client-config, /ws/observe)
+# Add data endpoints at root level (for /snapshot, /client-config, /stream-health, /ws/observe)
 app.include_router(data_endpoints.router)
 
 

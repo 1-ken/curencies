@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
 
 from app.services.observer_service import SiteObserver
 from app.services.alert_service import AlertManager
@@ -99,16 +99,6 @@ def set_runtime_tuning(
     MAX_SNAPSHOT_FAILURES = max(1, int(max_snapshot_failures))
 
 
-@router.get("/")
-async def root():
-    """Serve the client HTML page."""
-    # Navigate from app/api/v1/endpoints/data.py to root directory
-    from pathlib import Path
-    root_dir = Path(__file__).parent.parent.parent.parent.parent
-    client_file = root_dir / "client.html"
-    return FileResponse(str(client_file))
-
-
 @router.get("/snapshot")
 async def snapshot():
     """Get a single snapshot of current forex data.
@@ -123,14 +113,28 @@ async def snapshot():
         return JSONResponse({"error": "Observer not ready"}, status_code=503)
     
     try:
-        data = await observer.snapshot(MAJORS)
+        data = await asyncio.wait_for(
+            observer.snapshot(MAJORS),
+            timeout=SNAPSHOT_TIMEOUT_SECONDS,
+        )
+        pairs = data.get("pairs") or []
+        if not pairs:
+            logger.warning("Snapshot requested but source returned empty pairs")
+            return JSONResponse({"error": "No fresh market data available"}, status_code=503)
+
         # Return clean format without alerts
         clean_data = {
             "market_status": "open" if is_forex_market_open() else "closed",
-            "pairs": data.get("pairs", []),
+            "pairs": pairs,
             "ts": data.get("ts")
         }
         return JSONResponse(clean_data)
+    except asyncio.TimeoutError:
+        logger.error(
+            "Snapshot endpoint timed out after %.1fs",
+            SNAPSHOT_TIMEOUT_SECONDS,
+        )
+        return JSONResponse({"error": "Snapshot request timed out"}, status_code=504)
     except Exception as e:
         logger.error(f"Error getting snapshot: {e}")
         return JSONResponse({"error": "Failed to get snapshot"}, status_code=500)
@@ -166,7 +170,11 @@ async def stream_health():
     status = "healthy"
     if snapshot_failure_count > 0:
         status = "degraded"
-    if last_snapshot_age_seconds is not None and last_snapshot_age_seconds > max(5.0, STREAM_INTERVAL * 6):
+    if snapshot_failure_count >= MAX_SNAPSHOT_FAILURES:
+        status = "stale"
+    elif last_snapshot_age_seconds is None and snapshot_failure_count > 0:
+        status = "stale"
+    elif last_snapshot_age_seconds is not None and last_snapshot_age_seconds > max(5.0, STREAM_INTERVAL * 6):
         status = "stale"
 
     return JSONResponse(
@@ -195,10 +203,15 @@ async def ws_observe(ws: WebSocket):
         await ws.close()
         return
 
+    stop_event = asyncio.Event()
+    disconnect_watcher = asyncio.create_task(_watch_ws_disconnect(ws, stop_event))
+
     try:
         if redis_service and REDIS_PUBSUB_ENABLED:
             logger.info("WebSocket %s using Redis pub/sub stream", ws.client)
-            async for data in redis_service.subscribe():
+            async for data in redis_service.subscribe(stop_event=stop_event):
+                if stop_event.is_set():
+                    break
                 data = _attach_alerts(data)
                 await asyncio.wait_for(
                     ws.send_json(data),
@@ -214,9 +227,12 @@ async def ws_observe(ws: WebSocket):
                 len(data_subscribers),
             )
 
-            while True:
+            while not stop_event.is_set():
                 # Get data from the central stream
-                data = await data_queue.get()
+                try:
+                    data = await asyncio.wait_for(data_queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    continue
                 data = _attach_alerts(data)
                 await asyncio.wait_for(
                     ws.send_json(data),
@@ -229,6 +245,15 @@ async def ws_observe(ws: WebSocket):
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
     finally:
+        stop_event.set()
+        disconnect_watcher.cancel()
+        try:
+            await disconnect_watcher
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+
         if not (redis_service and REDIS_PUBSUB_ENABLED):
             if "data_queue" in locals() and data_queue in data_subscribers:
                 data_subscribers.remove(data_queue)
@@ -260,6 +285,21 @@ def _attach_alerts(data: Dict[str, Any]) -> Dict[str, Any]:
         }
     }
     return clean_data
+
+
+async def _watch_ws_disconnect(ws: WebSocket, stop_event: asyncio.Event) -> None:
+    """Watch for client disconnect and signal stream loops to stop quickly."""
+    try:
+        while not stop_event.is_set():
+            message = await ws.receive()
+            if message.get("type") == "websocket.disconnect":
+                break
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.debug("WebSocket disconnect watcher stopped: %s", e)
+    finally:
+        stop_event.set()
 
 
 def _queue_latest(queue: asyncio.Queue, data: Dict[str, Any]) -> None:
@@ -359,8 +399,12 @@ async def data_streaming_task():
                     observer.snapshot(MAJORS),
                     timeout=SNAPSHOT_TIMEOUT_SECONDS,
                 )
+                pairs = data.get("pairs") or []
+                if not pairs:
+                    raise ValueError("Snapshot returned empty pairs")
+
                 latest_data = data
-                last_snapshot_ts = data.get("ts")
+                last_snapshot_ts = data.get("ts") or datetime.now(timezone.utc).isoformat()
                 snapshot_failure_count = 0
 
                 if redis_service:

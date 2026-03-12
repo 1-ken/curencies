@@ -46,8 +46,7 @@ Start the server:
 ```powershell
 uvicorn main:app --reload --port 8000
 ```
-Open the client (optional):
-- Open `client.html` in a browser.
+Use your frontend app (for example, Next.js) to consume the API and WebSocket endpoints.
 
 One-off snapshot test (optional):
 ```powershell

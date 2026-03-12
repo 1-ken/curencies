@@ -23,20 +23,6 @@
       "description": "Endpoints for real-time forex data",
       "item": [
         {
-          "name": "Home / Client HTML",
-          "request": {
-            "method": "GET",
-            "header": [],
-            "url": {
-              "raw": "{{base_url}}/",
-              "host": ["{{base_url}}"],
-              "path": [""]
-            },
-            "description": "Serves the client HTML page"
-          },
-          "response": []
-        },
-        {
           "name": "Get Current Snapshot",
           "request": {
             "method": "GET",

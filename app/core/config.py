@@ -110,6 +110,46 @@ class Config:
         return value.lower() in {"1", "true", "yes", "on"}
 
     @property
+    def redis_socket_connect_timeout_seconds(self) -> float:
+        return float(
+            os.getenv(
+                "REDIS_SOCKET_CONNECT_TIMEOUT_SECONDS",
+                self.get("redisSocketConnectTimeoutSeconds", 2),
+            )
+        )
+
+    @property
+    def redis_socket_timeout_seconds(self) -> float:
+        return float(
+            os.getenv(
+                "REDIS_SOCKET_TIMEOUT_SECONDS",
+                self.get("redisSocketTimeoutSeconds", 2),
+            )
+        )
+
+    @property
+    def redis_retry_max_attempts(self) -> int:
+        return int(os.getenv("REDIS_RETRY_MAX_ATTEMPTS", self.get("redisRetryMaxAttempts", 5)))
+
+    @property
+    def redis_retry_base_delay_seconds(self) -> float:
+        return float(
+            os.getenv(
+                "REDIS_RETRY_BASE_DELAY_SECONDS",
+                self.get("redisRetryBaseDelaySeconds", 0.5),
+            )
+        )
+
+    @property
+    def redis_retry_max_delay_seconds(self) -> float:
+        return float(
+            os.getenv(
+                "REDIS_RETRY_MAX_DELAY_SECONDS",
+                self.get("redisRetryMaxDelaySeconds", 5),
+            )
+        )
+
+    @property
     def archive_interval_seconds(self) -> float:
         return float(os.getenv("ARCHIVE_INTERVAL_SECONDS", self.get("archiveIntervalSeconds", 30)))
 

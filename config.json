@@ -8,6 +8,11 @@
   "wsSendTimeoutSeconds": 3,
   "alertActionTimeoutSeconds": 8,
   "maxSnapshotFailures": 4,
+  "redisSocketConnectTimeoutSeconds": 2,
+  "redisSocketTimeoutSeconds": 2,
+  "redisRetryMaxAttempts": 5,
+  "redisRetryBaseDelaySeconds": 0.5,
+  "redisRetryMaxDelaySeconds": 5,
   "majors": ["USD", "EUR", "JPY", "GBP", "AUD", "CAD", "CHF", "NZD"],
   "injectMutationObserver": true
 }
