@@ -20,6 +20,37 @@ from playwright.async_api import (
 logger = logging.getLogger(__name__)
 
 
+COMMODITY_TRADER_SYMBOLS = {
+    "E-Mini S&P 500": "US500",
+    "Mini Dow Jones Indus.-$5": "US30",
+    "Nasdaq 100": "NAS100",
+    "E-mini Russell 2000": "US2000",
+    "E-mini Russell 2000 Index Futur": "US2000",
+    "U.S. Treasury Bond": "USBOND",
+    "10-Year T-Note": "US10Y",
+    "5-Year T-Note": "US05Y",
+    "2-Year T-Note": "US02Y",
+    "Gold": "XAUUSD",
+    "Micro Gold": "XAUUSD",
+    "Silver": "XAGUSD",
+    "Micro Silver": "XAGUSD",
+    "Platinum": "XPTUSD",
+    "Copper": "COPPER",
+    "Palladium": "XPDUSD",
+    "Crude Oil": "USOIL",
+    "Brent Crude Oil": "UKOIL",
+    "Natural Gas": "NATGAS",
+    "Heating Oil": "HEATINGOIL",
+    "RBOB Gasoline": "GASOLINE",
+    "Corn": "CORN",
+    "Soybean": "SOYBEAN",
+    "KC HRW Wheat": "WHEAT",
+    "Cotton": "COTTON",
+    "Coffee": "COFFEE",
+    "Cocoa": "COCOA",
+}
+
+
 class SiteObserver:
     def __init__(
         self,
@@ -392,8 +423,10 @@ class SiteObserver:
                 if not full_name:
                     continue
                 common_name = self._normalize_commodity_name(full_name)
+                trader_pair = self._to_trader_symbol(common_name)
                 row = dict(item)
-                row["pair"] = common_name
+                row["pair"] = trader_pair
+                row["common_name"] = common_name
                 row["contract_name"] = full_name
                 normalized.append(row)
             return normalized
@@ -407,7 +440,12 @@ class SiteObserver:
         cleaned = re.sub(r"\s+[A-Z][a-z]{2}\s+\d{2}$", "", cleaned)
         cleaned = re.sub(r"\s+Futures,?[A-Za-z0-9\-]*$", "", cleaned, flags=re.IGNORECASE)
         cleaned = re.sub(r"\s+Futures$", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s+Last Day Financ$", "", cleaned, flags=re.IGNORECASE)
         return cleaned.strip(" ,-") or name
+
+    @staticmethod
+    def _to_trader_symbol(common_name: str) -> str:
+        return COMMODITY_TRADER_SYMBOLS.get(common_name, common_name)
 
     @staticmethod
     def _parse_majors_from_texts(texts: List[str], majors: List[str]) -> List[str]:

@@ -148,9 +148,7 @@ async def _collect_snapshot_from_observers() -> Dict[str, Any]:
         if pairs:
             normalized_pairs = []
             for item in pairs:
-                row = dict(item)
-                row["source"] = source_name
-                normalized_pairs.append(row)
+                normalized_pairs.append(dict(item))
             merged_pairs.extend(normalized_pairs)
             by_source[source_name] = normalized_pairs
         merged_majors.update(result.get("majors") or [])
