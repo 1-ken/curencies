@@ -3,7 +3,7 @@ import json
 import logging
 import os
 from urllib.parse import quote_plus
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,48 @@ class Config:
     def get(self, key: str, default: Any = None) -> Any:
         """Get configuration value."""
         return self.data.get(key, default)
+
+    @property
+    def sources(self) -> List[Dict[str, Any]]:
+        """Return enabled scraping sources.
+
+        Supports both:
+        - New format: `sources: [{...}]`
+        - Legacy format: top-level url/selectors keys
+        """
+        raw_sources = self.get("sources")
+        if isinstance(raw_sources, list) and raw_sources:
+            normalized_sources: List[Dict[str, Any]] = []
+            for index, item in enumerate(raw_sources):
+                if not isinstance(item, dict):
+                    continue
+                if not bool(item.get("enabled", True)):
+                    continue
+                normalized_sources.append(
+                    {
+                        "name": item.get("name") or f"source-{index + 1}",
+                        "url": item.get("url", "https://finance.yahoo.com/markets/currencies/"),
+                        "waitSelector": item.get("waitSelector", "body"),
+                        "tableSelector": item.get("tableSelector", "table"),
+                        "pairCellSelector": item.get("pairCellSelector", "tbody tr td:nth-child(2)"),
+                        "injectMutationObserver": bool(item.get("injectMutationObserver", True)),
+                        "filterByMajors": bool(item.get("filterByMajors", True)),
+                    }
+                )
+            if normalized_sources:
+                return normalized_sources
+
+        return [
+            {
+                "name": "default",
+                "url": self.url,
+                "waitSelector": self.wait_selector,
+                "tableSelector": self.table_selector,
+                "pairCellSelector": self.pair_cell_selector,
+                "injectMutationObserver": self.inject_mutation_observer,
+                "filterByMajors": True,
+            }
+        ]
     
     @property
     def url(self) -> str:

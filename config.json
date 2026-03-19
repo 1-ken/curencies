@@ -1,4 +1,26 @@
 {
+  "sources": [
+    {
+      "name": "currencies",
+      "url": "https://finance.yahoo.com/markets/currencies/",
+      "waitSelector": "table tbody tr",
+      "tableSelector": "table",
+      "pairCellSelector": "tbody tr td:nth-child(2)",
+      "injectMutationObserver": true,
+      "filterByMajors": true,
+      "enabled": true
+    },
+    {
+      "name": "commodities",
+      "url": "https://finance.yahoo.com/markets/commodities/",
+      "waitSelector": "table tbody tr",
+      "tableSelector": "table",
+      "pairCellSelector": "tbody tr td[data-testid-cell='companyshortname.raw']",
+      "injectMutationObserver": true,
+      "filterByMajors": false,
+      "enabled": true
+    }
+  ],
   "url": "https://finance.yahoo.com/markets/currencies/",
   "waitSelector": "table tbody tr",
   "tableSelector": "table",

@@ -6,6 +6,13 @@ Streams live snapshots from a JS-heavy site using Playwright, extracts main FX c
 
 ## Configure
 Edit `config.json`:
+- `sources`: Optional array of source configs. If provided, each source is scraped concurrently and merged into one live stream.
+	- `name`: Source label (e.g., `currencies`, `commodities`).
+	- `url`: Target page URL.
+	- `waitSelector`, `tableSelector`, `pairCellSelector`: CSS selectors for extraction.
+	- `injectMutationObserver`: Enable DOM mutation tracking for that source.
+	- `filterByMajors`: If true, keep only rows matching configured `majors`.
+	- `enabled`: Enable/disable source without removing config.
 - `url`: Target website.
 - `waitSelector`: Element to wait for (e.g., `body`).
 - `tableSelector`: CSS for the pairs table (e.g., `#pairs-table`, `.currency-pairs`).
@@ -57,6 +64,40 @@ python observer.py
 Each snapshot payload:
 - `title`: Page title.
 - `majors`: Unique set of major currencies present.
+- `pairs`: Merged rows from all active sources.
 - `pairsSample`: First 10 cell texts for quick inspection.
 - `changes`: Recent DOM mutation types (if enabled).
 - `ts`: ISO timestamp (UTC).
+
+## /snapshot response contract
+`GET /snapshot` returns grouped market rows by source:
+
+```json
+{
+	"market_status": "open",
+	"pairs": {
+		"currencies": [
+			{
+				"pair": "EUR/USD",
+				"price": "1.1514",
+				"change": "-0.19",
+				"source": "currencies"
+			}
+		],
+		"commodities": [
+			{
+				"pair": "Gold",
+				"contract_name": "Gold Apr 26",
+				"price": "4890.70",
+				"change": "+0.25",
+				"source": "commodities"
+			}
+		]
+	},
+	"ts": "2026-03-19T05:25:37.000000+00:00"
+}
+```
+
+Notes:
+- `pairs.currencies` and `pairs.commodities` are always present as arrays (possibly empty).
+- Commodity `pair` is normalized to a common name (e.g., `Gold`, `Nasdaq 100`), while `contract_name` keeps the full contract label when available.

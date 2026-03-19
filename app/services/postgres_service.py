@@ -39,6 +39,24 @@ class PostgresService:
             raise RuntimeError("PostgreSQL engine not initialized")
         async with self._engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            current_pair_length = await conn.scalar(
+                text(
+                    """
+                    SELECT character_maximum_length
+                    FROM information_schema.columns
+                    WHERE table_name = 'historical_prices'
+                      AND column_name = 'pair'
+                    """
+                )
+            )
+            if current_pair_length is not None and int(current_pair_length) < 64:
+                await conn.execute(
+                    text("ALTER TABLE historical_prices ALTER COLUMN pair TYPE VARCHAR(64)")
+                )
+                logger.info(
+                    "Migrated historical_prices.pair column from VARCHAR(%s) to VARCHAR(64)",
+                    current_pair_length,
+                )
         logger.info("PostgreSQL schema ensured")
 
     async def insert_snapshots(self, snapshots: Iterable[Dict[str, Any]]) -> int:

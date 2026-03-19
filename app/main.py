@@ -54,6 +54,7 @@ async def normalize_paths(request, call_next):
 
 # Global state
 observer: SiteObserver | None = None
+observers: list[SiteObserver] = []
 alert_manager: AlertManager = AlertManager()
 background_task: asyncio.Task | None = None
 data_stream_task: asyncio.Task | None = None
@@ -87,7 +88,7 @@ else:
 @app.on_event("startup")
 async def on_startup():
     """Initialize the observer on application startup."""
-    global observer, background_task, data_stream_task, archive_task
+    global observer, observers, background_task, data_stream_task, archive_task
     global redis_service, postgres_service
     logger.info("Starting Finance Observer application...")
     
@@ -122,25 +123,37 @@ async def on_startup():
             logger.warning("PostgreSQL unavailable: %s", e)
             postgres_service = None
 
-        observer = SiteObserver(
-            url=config.url,
-            table_selector=config.table_selector,
-            pair_cell_selector=config.pair_cell_selector,
-            wait_selector=config.wait_selector,
-            inject_mutation_observer=config.inject_mutation_observer,
-        )
-        try:
-            await observer.startup()
-            logger.info("Observer started successfully")
-        except Exception as e:
-            logger.error(
-                "Observer initial startup failed (%s). "
-                "Starting API in degraded mode; background recovery will retry.",
-                e,
+        observers = []
+        for source in config.sources:
+            source_name = str(source.get("name", "default"))
+            source_observer = SiteObserver(
+                url=source.get("url", config.url),
+                table_selector=source.get("tableSelector", config.table_selector),
+                pair_cell_selector=source.get("pairCellSelector", config.pair_cell_selector),
+                wait_selector=source.get("waitSelector", config.wait_selector),
+                inject_mutation_observer=bool(
+                    source.get("injectMutationObserver", config.inject_mutation_observer)
+                ),
+                filter_by_majors=bool(source.get("filterByMajors", True)),
+                source_name=source_name,
             )
+            try:
+                await source_observer.startup()
+                observers.append(source_observer)
+                logger.info("Observer '%s' started successfully", source_name)
+            except Exception as e:
+                logger.error(
+                    "Observer '%s' initial startup failed (%s). "
+                    "Continuing startup in degraded mode.",
+                    source_name,
+                    e,
+                )
+
+        observer = observers[0] if observers else None
         
         # Set instances for endpoint handlers
         alerts_endpoints.set_alert_manager(alert_manager)
+        data_endpoints.set_observers(observers)
         data_endpoints.set_observer(observer)
         data_endpoints.set_alert_manager(alert_manager)
         data_endpoints.set_config(config.stream_interval_seconds, config.majors)
@@ -213,13 +226,13 @@ async def on_shutdown():
             pass
         logger.info("Archive task cancelled")
     
-    if observer:
-        logger.info("Shutting down observer...")
+    for obs in observers:
+        logger.info("Shutting down observer '%s'...", getattr(obs, "source_name", "default"))
         try:
-            await observer.shutdown()
-            logger.info("Observer shutdown complete")
+            await obs.shutdown()
+            logger.info("Observer '%s' shutdown complete", getattr(obs, "source_name", "default"))
         except Exception as e:
-            logger.error(f"Error during shutdown: {e}")
+            logger.error("Error during observer shutdown: %s", e)
 
     if redis_service:
         try:
@@ -255,7 +268,10 @@ async def health_check():
     checks["uptime_seconds"] = round(time.monotonic() - _app_start_time, 1)
 
     # 2. Observer / browser
-    obs_ready = observer is not None and observer.browser is not None and observer.page is not None
+    obs_ready = any(
+        obs.browser is not None and obs.page is not None
+        for obs in observers
+    )
     checks["observer"] = "up" if obs_ready else "down"
     if not obs_ready:
         overall = "down"

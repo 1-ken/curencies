@@ -24,6 +24,7 @@ router = APIRouter(
 
 # Global instances
 observer: SiteObserver = None
+observers: List[SiteObserver] = []
 alert_manager: AlertManager = None
 data_subscribers: List[asyncio.Queue] = []
 latest_data: Dict[str, Any] = {}
@@ -81,6 +82,13 @@ def set_observer(obs: SiteObserver):
     observer = obs
 
 
+def set_observers(obs_list: List[SiteObserver]):
+    """Set all observer instances."""
+    global observers, observer
+    observers = obs_list or []
+    observer = observers[0] if observers else None
+
+
 def set_alert_manager(manager: AlertManager):
     """Set the global alert manager instance."""
     global alert_manager
@@ -92,6 +100,94 @@ def set_config(stream_interval: float, majors: List[str]):
     global STREAM_INTERVAL, MAJORS
     STREAM_INTERVAL = stream_interval
     MAJORS = majors
+
+
+def _active_observers() -> List[SiteObserver]:
+    if observers:
+        return observers
+    if observer:
+        return [observer]
+    return []
+
+
+async def _collect_snapshot_from_observers() -> Dict[str, Any]:
+    active = _active_observers()
+    if not active:
+        raise RuntimeError("Observer not ready")
+
+    tasks = [
+        asyncio.wait_for(obs.snapshot(MAJORS), timeout=SNAPSHOT_TIMEOUT_SECONDS)
+        for obs in active
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    merged_pairs: List[Dict[str, Any]] = []
+    by_source: Dict[str, List[Dict[str, Any]]] = {}
+    merged_majors = set()
+    merged_titles: List[str] = []
+    merged_changes: List[str] = []
+    merged_samples: List[str] = []
+    successful_snapshots = 0
+    timeout_failures = 0
+
+    for obs, result in zip(active, results):
+        source_name = str(getattr(obs, "source_name", "default"))
+        if isinstance(result, Exception):
+            if isinstance(result, asyncio.TimeoutError):
+                timeout_failures += 1
+            logger.error(
+                "Snapshot failed for observer '%s': %s",
+                source_name,
+                result,
+            )
+            continue
+
+        successful_snapshots += 1
+
+        pairs = result.get("pairs") or []
+        if pairs:
+            normalized_pairs = []
+            for item in pairs:
+                row = dict(item)
+                row["source"] = source_name
+                normalized_pairs.append(row)
+            merged_pairs.extend(normalized_pairs)
+            by_source[source_name] = normalized_pairs
+        merged_majors.update(result.get("majors") or [])
+        title = result.get("title")
+        if title:
+            merged_titles.append(title)
+        merged_changes.extend(result.get("changes") or [])
+        merged_samples.extend(result.get("pairsSample") or [])
+
+    if successful_snapshots == 0 and timeout_failures > 0:
+        raise asyncio.TimeoutError("All observers timed out")
+
+    return {
+        "title": " | ".join(dict.fromkeys(merged_titles)),
+        "majors": sorted(merged_majors),
+        "pairs": merged_pairs,
+        "sources": by_source,
+        "pairsSample": merged_samples[:10],
+        "changes": merged_changes,
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _split_pairs_by_source(data: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
+    explicit = data.get("sources")
+    if isinstance(explicit, dict):
+        return {
+            str(name): list(items or [])
+            for name, items in explicit.items()
+            if isinstance(items, list)
+        }
+
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    for item in data.get("pairs", []):
+        source_name = str(item.get("source") or "default")
+        grouped.setdefault(source_name, []).append(item)
+    return grouped
 
 
 def set_redis_service(service: Optional[RedisService], pubsub_enabled: bool):
@@ -138,7 +234,7 @@ async def snapshot():
     - pairs: currency pairs with prices
     - ts: timestamp
     """
-    if not observer:
+    if not _active_observers():
         logger.warning("Snapshot requested but observer not ready")
         return JSONResponse({"error": "Observer not ready"}, status_code=503)
 
@@ -153,10 +249,14 @@ async def snapshot():
                 parsed = parsed.replace(tzinfo=timezone.utc)
             age_seconds = (datetime.now(timezone.utc) - parsed.astimezone(timezone.utc)).total_seconds()
             if age_seconds <= max(5.0, STREAM_INTERVAL * 3):
+                cached_sources = _split_pairs_by_source(latest_data or {})
                 return JSONResponse(
                     {
                         "market_status": "open" if is_forex_market_open() else "closed",
-                        "pairs": cached_pairs,
+                        "pairs": {
+                            "currencies": cached_sources.get("currencies", []),
+                            "commodities": cached_sources.get("commodities", []),
+                        },
                         "ts": cached_ts,
                     }
                 )
@@ -164,19 +264,21 @@ async def snapshot():
             pass
     
     try:
-        data = await asyncio.wait_for(
-            observer.snapshot(MAJORS),
-            timeout=SNAPSHOT_TIMEOUT_SECONDS,
-        )
+        data = await _collect_snapshot_from_observers()
         pairs = data.get("pairs") or []
         if not pairs:
             logger.warning("Snapshot requested but source returned empty pairs")
             return JSONResponse({"error": "No fresh market data available"}, status_code=503)
 
         # Return clean format without alerts
+        grouped_pairs = _split_pairs_by_source(data)
+
         clean_data = {
             "market_status": "open" if is_forex_market_open() else "closed",
-            "pairs": pairs,
+            "pairs": {
+                "currencies": grouped_pairs.get("currencies", []),
+                "commodities": grouped_pairs.get("commodities", []),
+            },
             "ts": data.get("ts")
         }
         return JSONResponse(clean_data)
@@ -251,7 +353,7 @@ async def ws_observe(ws: WebSocket):
     await ws.accept()
     connection_counted = False
     
-    if not observer:
+    if not _active_observers():
         logger.warning("WebSocket connection but observer not ready")
         await ws.send_json({"error": "Observer not ready"})
         await ws.close()
@@ -344,10 +446,15 @@ def _attach_alerts(data: Dict[str, Any]) -> Dict[str, Any]:
     Removes debug/metadata fields and adds market status indicator.
     Keeps only essential fields: pair prices, timestamp, market status, and alerts.
     """
-    # Build clean response - only essential fields for clients
+    grouped_pairs = _split_pairs_by_source(data)
+
+    # Build clean response - grouped by source for websocket consumers
     clean_data = {
         "market_status": "open" if is_forex_market_open() else "closed",
-        "pairs": data.get("pairs", []),
+        "pairs": {
+            "currencies": grouped_pairs.get("currencies", []),
+            "commodities": grouped_pairs.get("commodities", []),
+        },
         "ts": data.get("ts"),
         "alerts": {
             "active": [a.to_dict() for a in alert_manager.get_active_alerts()],
@@ -392,25 +499,28 @@ def _queue_latest(queue: asyncio.Queue, data: Dict[str, Any]) -> None:
 
 
 async def _restart_observer() -> bool:
-    """Restart observer safely to recover from prolonged snapshot stalls."""
-    global observer
-    if not observer:
+    """Restart observer(s) safely to recover from prolonged snapshot stalls."""
+    active = _active_observers()
+    if not active:
         return False
 
     async with _observer_restart_lock:
-        logger.warning("Restarting observer due to repeated snapshot failures")
-        try:
-            await observer.shutdown()
-        except Exception as e:
-            logger.warning("Observer shutdown during restart failed: %s", e)
+        logger.warning("Restarting observer(s) due to repeated snapshot failures")
+        restarted_any = False
+        for obs in active:
+            source_name = getattr(obs, "source_name", "default")
+            try:
+                await obs.shutdown()
+            except Exception as e:
+                logger.warning("Observer '%s' shutdown during restart failed: %s", source_name, e)
 
-        try:
-            await observer.startup()
-            logger.info("Observer restart completed")
-            return True
-        except Exception as e:
-            logger.error("Observer restart failed: %s", e)
-            return False
+            try:
+                await obs.startup()
+                restarted_any = True
+                logger.info("Observer '%s' restart completed", source_name)
+            except Exception as e:
+                logger.error("Observer '%s' restart failed: %s", source_name, e)
+        return restarted_any
 
 
 async def _run_alert_action(func, **kwargs) -> bool:
@@ -465,12 +575,9 @@ async def data_streaming_task():
                 logger.info("✅ Forex market is OPEN. Resuming data streaming.")
                 market_closed_logged = False
             
-            if observer:
+            if _active_observers():
                 # Fetch current market data
-                data = await asyncio.wait_for(
-                    observer.snapshot(MAJORS),
-                    timeout=SNAPSHOT_TIMEOUT_SECONDS,
-                )
+                data = await _collect_snapshot_from_observers()
                 pairs = data.get("pairs") or []
                 if not pairs:
                     raise ValueError("Snapshot returned empty pairs")

@@ -28,12 +28,16 @@ class SiteObserver:
         pair_cell_selector: str,
         wait_selector: str = "body",
         inject_mutation_observer: bool = True,
+        filter_by_majors: bool = True,
+        source_name: str = "default",
     ) -> None:
         self.url = url
         self.table_selector = table_selector
         self.pair_cell_selector = pair_cell_selector
         self.wait_selector = wait_selector
         self.inject_mutation_observer = inject_mutation_observer
+        self.filter_by_majors = filter_by_majors
+        self.source_name = source_name
 
         self._pw = None
         self.browser: Optional[Browser] = None
@@ -380,7 +384,30 @@ class SiteObserver:
         }})()
         """
         pairs_data: List[Dict[str, Any]] = await self.page.evaluate(js)
+
+        if self.source_name.lower() == "commodities":
+            normalized: List[Dict[str, Any]] = []
+            for item in pairs_data:
+                full_name = str(item.get("pair") or "").strip()
+                if not full_name:
+                    continue
+                common_name = self._normalize_commodity_name(full_name)
+                row = dict(item)
+                row["pair"] = common_name
+                row["contract_name"] = full_name
+                normalized.append(row)
+            return normalized
+
         return pairs_data
+
+    @staticmethod
+    def _normalize_commodity_name(name: str) -> str:
+        cleaned = re.sub(r"\s+", " ", name).strip()
+        cleaned = re.sub(r",?\s*[A-Z][a-z]{2}-\d{4}$", "", cleaned)
+        cleaned = re.sub(r"\s+[A-Z][a-z]{2}\s+\d{2}$", "", cleaned)
+        cleaned = re.sub(r"\s+Futures,?[A-Za-z0-9\-]*$", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\s+Futures$", "", cleaned, flags=re.IGNORECASE)
+        return cleaned.strip(" ,-") or name
 
     @staticmethod
     def _parse_majors_from_texts(texts: List[str], majors: List[str]) -> List[str]:
@@ -415,17 +442,21 @@ class SiteObserver:
             texts = [item["pair"] for item in pairs_with_prices]
             majors_found = self._parse_majors_from_texts(texts, majors)
 
-            major_pairs = [
-                item for item in pairs_with_prices
-                if any(m.upper() in item["pair"].upper() for m in majors)
-            ]
+            if self.filter_by_majors and majors:
+                selected_pairs = [
+                    item for item in pairs_with_prices
+                    if any(m.upper() in item["pair"].upper() for m in majors)
+                ]
+            else:
+                selected_pairs = pairs_with_prices
 
             title = await self.page.title()
             changes: List[str] = await self.page.evaluate("() => (window.__changes || []).splice(0)")
             return {
+                "source": self.source_name,
                 "title": title,
                 "majors": majors_found,
-                "pairs": major_pairs,
+                "pairs": selected_pairs,
                 "pairsSample": texts[:10],
                 "changes": changes,
                 "ts": datetime.now().isoformat(),
@@ -442,6 +473,8 @@ async def observe_once_from_config(config_path: str) -> Dict[str, Any]:
         pair_cell_selector=cfg.get("pairCellSelector", "tbody tr td:first-child"),
         wait_selector=cfg.get("waitSelector", "body"),
         inject_mutation_observer=bool(cfg.get("injectMutationObserver", True)),
+        filter_by_majors=bool(cfg.get("filterByMajors", True)),
+        source_name=str(cfg.get("name", "default")),
     )
 
     try:
