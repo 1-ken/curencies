@@ -427,7 +427,6 @@ class SiteObserver:
                 row = dict(item)
                 row["pair"] = trader_pair
                 row["common_name"] = common_name
-                row["contract_name"] = full_name
                 normalized.append(row)
             return normalized
 

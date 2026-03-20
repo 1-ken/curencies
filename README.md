@@ -87,7 +87,7 @@ Each snapshot payload:
 		"commodities": [
 			{
 				"pair": "Gold",
-				"contract_name": "Gold Apr 26",
+				"common_name": "Gold",
 				"price": "4890.70",
 				"change": "+0.25",
 				"source": "commodities"
@@ -100,4 +100,4 @@ Each snapshot payload:
 
 Notes:
 - `pairs.currencies` and `pairs.commodities` are always present as arrays (possibly empty).
-- Commodity `pair` is normalized to a common name (e.g., `Gold`, `Nasdaq 100`), while `contract_name` keeps the full contract label when available.
+- Commodity `pair` is normalized to trader-common symbols (e.g., `XAUUSD`, `NAS100`) and `common_name` contains readable labels (e.g., `Gold`, `Nasdaq 100`).
