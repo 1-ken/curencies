@@ -16,26 +16,38 @@ ALERTS_FILE = "alerts.json"
 
 @dataclass
 class Alert:
-    """Price alert configuration."""
+    """Alert configuration - supports both price and candle-close modes."""
     id: str
     pair: str
-    target_price: float
-    condition: str  # "above", "below", or "equal"
     status: str  # "active", "triggered", "disabled"
     created_at: str
+    alert_type: str = "price"  # "price" (legacy) or "candle_close"
+    channel: str = "email"  # "email", "sms", or "call"
     email: str = ""
-    channel: str = "email"  # "email" or "sms"
     phone: str = ""
     custom_message: str = ""
     triggered_at: Optional[str] = None
     last_checked_price: Optional[float] = None
+    
+    # Price alert fields (for alert_type="price")
+    target_price: Optional[float] = None
+    condition: Optional[str] = None  # "above", "below", "equal"
+    
+    # Candle-close alert fields (for alert_type="candle_close")
+    interval: Optional[str] = None  # "1m", "5m", "15m", "30m", "1h", "4h", "1d"
+    direction: Optional[str] = None  # "above" or "below"
+    threshold: Optional[float] = None  # Price level to compare candle close against
+    last_evaluated_candle_time: Optional[str] = None  # Timestamp of last checked candle
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
     @staticmethod
     def from_dict(data: Dict[str, Any]) -> "Alert":
-        return Alert(**data)
+        # Handle backward compatibility: old alerts without alert_type default to "price"
+        if "alert_type" not in data:
+            data["alert_type"] = "price"
+        return Alert(**{k: v for k, v in data.items() if k in Alert.__dataclass_fields__})
 
 
 class AlertManager:
@@ -79,11 +91,12 @@ class AlertManager:
         phone: str = "",
         custom_message: str = "",
     ) -> Alert:
-        """Create a new alert."""
+        """Create a new legacy price alert (alert_type='price')."""
         alert_id = str(uuid.uuid4())
         alert = Alert(
             id=alert_id,
             pair=pair,
+            alert_type="price",
             target_price=target_price,
             condition=condition,
             email=email,
@@ -95,7 +108,40 @@ class AlertManager:
         )
         self.alerts[alert_id] = alert
         self._save_alerts()
-        logger.info(f"Created alert {alert_id} for {pair} at {target_price}")
+        logger.info(f"Created price alert {alert_id} for {pair} at {target_price}")
+        return alert
+
+    def create_candle_alert(
+        self,
+        pair: str,
+        interval: str,
+        direction: str,
+        threshold: float,
+        email: str = "",
+        channel: str = "email",
+        phone: str = "",
+        custom_message: str = "",
+    ) -> Alert:
+        """Create a new candle-close threshold alert (alert_type='candle_close')."""
+        alert_id = str(uuid.uuid4())
+        alert = Alert(
+            id=alert_id,
+            pair=pair,
+            alert_type="candle_close",
+            interval=interval,
+            direction=direction,
+            threshold=threshold,
+            email=email,
+            channel=channel,
+            phone=phone,
+            custom_message=custom_message,
+            status="active",
+            created_at=datetime.now().isoformat(),
+            last_evaluated_candle_time=None,
+        )
+        self.alerts[alert_id] = alert
+        self._save_alerts()
+        logger.info(f"Created candle-close alert {alert_id} for {pair} {interval} {direction} {threshold}")
         return alert
 
     def get_alert(self, alert_id: str) -> Optional[Alert]:
@@ -200,3 +246,69 @@ class AlertManager:
         Examples: 'EUR/USD' -> 'EURUSD', 'eurusd' -> 'EURUSD', 'EURUSD' -> 'EURUSD'
         """
         return pair.replace("/", "").upper()
+    def check_candle_alerts(self, ohlc_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Check candle-close threshold alerts against latest closed candles.
+        
+        Args:
+            ohlc_data: List of OHLC candle dicts with keys:
+                       pair, interval, timestamp, open, high, low, close, volume
+        
+        Returns:
+            List of triggered alerts with their data.
+        """
+        triggered = []
+        
+        # Build lookup: (pair, interval) -> latest candle
+        candle_lookup: Dict[tuple, Dict[str, Any]] = {}
+        for candle in ohlc_data:
+            key = (self._normalize_pair(candle.get("pair", "")), candle.get("interval", ""))
+            # Keep the most recent (first in returned list if query sorts DESC then ASC)
+            if key not in candle_lookup:
+                candle_lookup[key] = candle
+        
+        # Check all active candle-close alerts
+        for alert in self.get_active_alerts():
+            if alert.alert_type != "candle_close":
+                continue
+            
+            key = (self._normalize_pair(alert.pair), alert.interval)
+            if key not in candle_lookup:
+                logger.debug(f"No candle data for {alert.pair} {alert.interval}")
+                continue
+            
+            candle = candle_lookup[key]
+            close_price = candle.get("close", 0.0)
+            candle_time = candle.get("timestamp")
+            
+            # Skip if we already evaluated this exact candle for this alert
+            if alert.last_evaluated_candle_time == str(candle_time):
+                continue
+            
+            should_trigger = False
+            if alert.direction == "above" and close_price >= alert.threshold:
+                should_trigger = True
+            elif alert.direction == "below" and close_price <= alert.threshold:
+                should_trigger = True
+            
+            if should_trigger:
+                logger.warning(
+                    "⚠️  CANDLE ALERT TRIGGERED: %s %s %s close=%s threshold=%s",
+                    alert.pair, alert.interval, alert.direction, close_price, alert.threshold
+                )
+                # Mark as triggered and save evaluation timestamp
+                alert.status = "triggered"
+                alert.triggered_at = datetime.now().isoformat()
+                alert.last_checked_price = close_price
+                alert.last_evaluated_candle_time = str(candle_time)
+                self._save_alerts()
+                triggered.append({
+                    "alert": alert.to_dict(),
+                    "current_price": close_price,
+                })
+            else:
+                # Update last evaluated candle time even if not triggered (for next iteration)
+                alert.last_evaluated_candle_time = str(candle_time)
+                self._save_alerts()
+        
+        return triggered

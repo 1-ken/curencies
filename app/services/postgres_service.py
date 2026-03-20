@@ -68,7 +68,7 @@ class PostgresService:
             observed_at = self._parse_timestamp(snapshot.get("ts"))
             title = snapshot.get("title")
             for pair_data in snapshot.get("pairs", []):
-                pair = pair_data.get("pair")
+                pair = self._normalize_pair(pair_data.get("pair"))
                 price = self._parse_price(pair_data.get("price"))
                 if not pair or price is None:
                     continue
@@ -102,7 +102,8 @@ class PostgresService:
 
         stmt = select(HistoricalPrice)
         if pair:
-            stmt = stmt.where(HistoricalPrice.pair == pair)
+            pair_variants = self._pair_variants(pair)
+            stmt = stmt.where(HistoricalPrice.pair.in_(pair_variants))
         if start:
             stmt = stmt.where(HistoricalPrice.observed_at >= start)
         if end:
@@ -178,7 +179,7 @@ class PostgresService:
         
         Args:
             pair: Currency pair (e.g., EURUSD)
-            interval: Time interval (5m, 15m, 1h, 4h, 1d)
+            interval: Time interval (1m, 5m, 15m, 30m, 1h, 4h, 1d)
             start: Start datetime filter
             end: End datetime filter
             limit: Max number of candles to return
@@ -189,35 +190,40 @@ class PostgresService:
         if not self._sessionmaker:
             raise RuntimeError("PostgreSQL session not initialized")
 
-        # Map interval to PostgreSQL interval
+        # Map interval to seconds for epoch-based bucketing
         interval_map = {
-            "1m": "1 minute",
-            "5m": "5 minutes",
-            "15m": "15 minutes",
-            "30m": "30 minutes",
-            "1h": "1 hour",
-            "4h": "4 hours",
-            "1d": "1 day",
+            "1m": 60,
+            "5m": 300,
+            "15m": 900,
+            "30m": 1800,
+            "1h": 3600,
+            "4h": 14400,
+            "1d": 86400,
         }
         
         if interval not in interval_map:
             raise ValueError(f"Invalid interval: {interval}. Must be one of {list(interval_map.keys())}")
         
-        pg_interval = interval_map[interval]
+        interval_seconds = interval_map[interval]
         
-        # Build SQL query for OHLC aggregation
-        # Use CAST to handle NULL parameters with explicit types
+        pair_variants = self._pair_variants(pair)
+        pair_0 = pair_variants[0]
+        pair_1 = pair_variants[1] if len(pair_variants) > 1 else pair_0
+        pair_2 = pair_variants[2] if len(pair_variants) > 2 else pair_0
+
+        # Build SQL query for OHLC aggregation using epoch-based bucketing
+        # This correctly handles multi-minute intervals like 5m, 15m, 30m
         query = text("""
             WITH candles AS (
                 SELECT
-                    DATE_TRUNC(:interval_unit, observed_at) AS bucket,
+                    TO_TIMESTAMP((EXTRACT(EPOCH FROM observed_at)::bigint / :interval_seconds) * :interval_seconds) AS bucket,
                     (ARRAY_AGG(price ORDER BY observed_at ASC))[1] AS open,
                     MAX(price) AS high,
                     MIN(price) AS low,
                     (ARRAY_AGG(price ORDER BY observed_at DESC))[1] AS close,
                     COUNT(*) AS volume
                 FROM historical_prices
-                WHERE pair = :pair
+                WHERE (pair = :pair_0 OR pair = :pair_1 OR pair = :pair_2)
                     AND (CAST(:start AS TIMESTAMP) IS NULL OR observed_at >= CAST(:start AS TIMESTAMP))
                     AND (CAST(:end AS TIMESTAMP) IS NULL OR observed_at <= CAST(:end AS TIMESTAMP))
                 GROUP BY bucket
@@ -227,12 +233,11 @@ class PostgresService:
             SELECT * FROM candles ORDER BY bucket ASC
         """)
         
-        # Extract just the time unit for DATE_TRUNC (minute, hour, day)
-        interval_unit = pg_interval.split()[-1].rstrip('s')  # '5 minutes' -> 'minute'
-        
         params = {
-            "pair": pair,
-            "interval_unit": interval_unit,
+            "pair_0": pair_0,
+            "pair_1": pair_1,
+            "pair_2": pair_2,
+            "interval_seconds": interval_seconds,
             "start": start,
             "end": end,
             "limit": limit,
@@ -245,14 +250,122 @@ class PostgresService:
             return [
                 {
                     "timestamp": row[0],
-                    "open": float(row[1]),
-                    "high": float(row[2]),
-                    "low": float(row[3]),
-                    "close": float(row[4]),
-                    "volume": int(row[5]),
+                    "open": float(row[1]) if row[1] is not None else None,
+                    "high": float(row[2]) if row[2] is not None else None,
+                    "low": float(row[3]) if row[3] is not None else None,
+                    "close": float(row[4]) if row[4] is not None else None,
+                    "volume": int(row[5]) if row[5] is not None else 0,
                 }
                 for row in rows
             ]
+
+    async def get_latest_closed_candle(
+        self,
+        pair: str,
+        interval: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Get the most recent fully closed candle for a pair and interval.
+        
+        A candle is considered closed once the current time has passed its bucket end.
+        For example, with a 15m interval, the candle closes 15 minutes after its start time.
+        
+        Args:
+            pair: Currency pair (e.g., EURUSD)
+            interval: Time interval (1m, 5m, 15m, 30m, 1h, 4h, 1d)
+            
+        Returns:
+            Dict with timestamp, open, high, low, close, volume, or None if no data
+        """
+        if not self._sessionmaker:
+            raise RuntimeError("PostgreSQL session not initialized")
+        
+        # Map interval to seconds for epoch-based bucketing
+        interval_map = {
+            "1m": 60,
+            "5m": 300,
+            "15m": 900,
+            "30m": 1800,
+            "1h": 3600,
+            "4h": 14400,
+            "1d": 86400,
+        }
+        
+        if interval not in interval_map:
+            raise ValueError(f"Invalid interval: {interval}. Must be one of {list(interval_map.keys())}")
+        
+        interval_seconds = interval_map[interval]
+        
+        pair_variants = self._pair_variants(pair)
+        pair_0 = pair_variants[0]
+        pair_1 = pair_variants[1] if len(pair_variants) > 1 else pair_0
+        pair_2 = pair_variants[2] if len(pair_variants) > 2 else pair_0
+
+        # Query: Get the candle that is fully closed (before the current bucket)
+        query = text("""
+            SELECT
+                TO_TIMESTAMP((EXTRACT(EPOCH FROM observed_at)::bigint / :interval_seconds) * :interval_seconds) AS bucket,
+                (ARRAY_AGG(price ORDER BY observed_at ASC))[1] AS open,
+                MAX(price) AS high,
+                MIN(price) AS low,
+                (ARRAY_AGG(price ORDER BY observed_at DESC))[1] AS close,
+                COUNT(*) AS volume
+            FROM historical_prices
+            WHERE (pair = :pair_0 OR pair = :pair_1 OR pair = :pair_2)
+                AND observed_at < TO_TIMESTAMP((EXTRACT(EPOCH FROM NOW())::bigint / :interval_seconds) * :interval_seconds)
+            GROUP BY bucket
+            ORDER BY bucket DESC
+            LIMIT 1
+        """)
+        
+        params = {
+            "pair_0": pair_0,
+            "pair_1": pair_1,
+            "pair_2": pair_2,
+            "interval_seconds": interval_seconds,
+        }
+        
+        async with self._sessionmaker() as session:
+            result = await session.execute(query, params)
+            row = result.fetchone()
+            
+            if not row:
+                return None
+            
+            return {
+                "pair": pair,
+                "interval": interval,
+                "timestamp": row[0],
+                "open": float(row[1]) if row[1] is not None else None,
+                "high": float(row[2]) if row[2] is not None else None,
+                "low": float(row[3]) if row[3] is not None else None,
+                "close": float(row[4]) if row[4] is not None else None,
+                "volume": int(row[5]) if row[5] is not None else 0,
+            }
+
+    async def get_latest_closed_candles_for_alerts(
+        self,
+        alerts: List[Dict[str, str]],
+    ) -> List[Dict[str, Any]]:
+        """Get latest closed candles for all candle-type alerts.
+        
+        Args:
+            alerts: List of alert dicts with 'pair' and 'interval' keys
+            
+        Returns:
+            List of candle dicts with pair, interval, and OHLC data
+        """
+        candles = []
+        for alert in alerts:
+            try:
+                candle = await self.get_latest_closed_candle(
+                    pair=alert.get("pair"),
+                    interval=alert.get("interval"),
+                )
+                if candle:
+                    candles.append(candle)
+            except Exception as e:
+                logger.error(f"Failed to get candle for {alert.get('pair')} {alert.get('interval')}: {e}")
+        return candles
 
     @staticmethod
     def _parse_timestamp(value: Optional[str]) -> datetime:
@@ -274,6 +387,35 @@ class PostgresService:
             return float(str(value).replace(",", ""))
         except ValueError:
             return None
+
+    @staticmethod
+    def _normalize_pair(value: Optional[str]) -> Optional[str]:
+        if not value:
+            return None
+        pair = str(value).strip()
+        if not pair:
+            return None
+
+        compact = pair.upper().replace("/", "")
+        if len(compact) == 6 and compact.isalpha():
+            return compact
+        return pair
+
+    @classmethod
+    def _pair_variants(cls, value: Optional[str]) -> List[str]:
+        normalized = cls._normalize_pair(value)
+        if not normalized:
+            return []
+
+        variants = [normalized]
+        compact = normalized.upper().replace("/", "")
+        if len(compact) == 6 and compact.isalpha():
+            slash_pair = f"{compact[:3]}/{compact[3:]}"
+            if slash_pair not in variants:
+                variants.append(slash_pair)
+            if compact not in variants:
+                variants.append(compact)
+        return variants
 
     async def _ensure_database_exists(self) -> None:
         url = make_url(self.dsn)

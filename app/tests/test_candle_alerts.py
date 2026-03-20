@@ -1,0 +1,544 @@
+"""Tests for candle-close alert functionality."""
+import pytest
+from datetime import datetime, timezone, timedelta
+from app.services.alert_service import AlertManager, Alert
+
+
+class TestCandleAlertCreation:
+    """Test creating candle-close alerts."""
+    
+    def test_create_candle_alert_above(self, tmp_path):
+        """Test creating a candle-close alert with 'above' direction."""
+        alert_file = tmp_path / "alerts.json"
+        manager = AlertManager(str(alert_file))
+        
+        alert = manager.create_candle_alert(
+            pair="EURUSD",
+            interval="15m",
+            direction="above",
+            threshold=1.0850,
+            email="test@example.com",
+            channel="email",
+        )
+        
+        assert alert.alert_type == "candle_close"
+        assert alert.pair == "EURUSD"
+        assert alert.interval == "15m"
+        assert alert.direction == "above"
+        assert alert.threshold == 1.0850
+        assert alert.status == "active"
+        assert alert.email == "test@example.com"
+        assert alert.channel == "email"
+    
+    def test_create_candle_alert_below(self, tmp_path):
+        """Test creating a candle-close alert with 'below' direction."""
+        alert_file = tmp_path / "alerts.json"
+        manager = AlertManager(str(alert_file))
+        
+        alert = manager.create_candle_alert(
+            pair="GBPUSD",
+            interval="5m",
+            direction="below",
+            threshold=1.2500,
+            phone="+1234567890",
+            channel="sms",
+        )
+        
+        assert alert.alert_type == "candle_close"
+        assert alert.pair == "GBPUSD"
+        assert alert.interval == "5m"
+        assert alert.direction == "below"
+        assert alert.threshold == 1.2500
+        assert alert.phone == "+1234567890"
+        assert alert.channel == "sms"
+
+    def test_create_candle_alert_all_intervals(self, tmp_path):
+        """Test creating candle alerts for all supported intervals."""
+        alert_file = tmp_path / "alerts.json"
+        manager = AlertManager(str(alert_file))
+        
+        intervals = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
+        
+        for interval in intervals:
+            alert = manager.create_candle_alert(
+                pair="EURUSD",
+                interval=interval,
+                direction="above",
+                threshold=1.0850,
+                email="test@example.com",
+                channel="email",
+            )
+            assert alert.interval == interval
+            assert alert.alert_type == "candle_close"
+
+    def test_candle_alert_has_required_fields(self, tmp_path):
+        """Test that candle alert has all required fields."""
+        alert_file = tmp_path / "alerts.json"
+        manager = AlertManager(str(alert_file))
+        
+        alert = manager.create_candle_alert(
+            pair="EURUSD",
+            interval="15m",
+            direction="above",
+            threshold=1.0850,
+            email="test@example.com",
+            channel="email",
+        )
+        
+        # Check required fields
+        assert alert.id is not None
+        assert alert.pair == "EURUSD"
+        assert alert.alert_type == "candle_close"
+        assert alert.status == "active"
+        assert alert.interval == "15m"
+        assert alert.direction == "above"
+        assert alert.threshold == 1.0850
+        assert alert.created_at is not None
+        assert alert.channel == "email"
+        assert alert.email == "test@example.com"
+
+
+class TestCandleAlertEvaluation:
+    """Test candle-close alert evaluation logic."""
+    
+    def test_check_candle_alerts_above_triggers(self, tmp_path):
+        """Test that candle alert triggers when close >= threshold (above)."""
+        alert_file = tmp_path / "alerts.json"
+        manager = AlertManager(str(alert_file))
+        
+        alert = manager.create_candle_alert(
+            pair="EURUSD",
+            interval="15m",
+            direction="above",
+            threshold=1.0850,
+            email="test@example.com",
+            channel="email",
+        )
+        
+        # Create OHLC data with close above threshold
+        candle_data = [
+            {
+                "pair": "EURUSD",
+                "interval": "15m",
+                "timestamp": datetime.now(timezone.utc),
+                "open": 1.0820,
+                "high": 1.0860,
+                "low": 1.0815,
+                "close": 1.0855,  # Above threshold
+                "volume": 100,
+            }
+        ]
+        
+        triggered = manager.check_candle_alerts(candle_data)
+        
+        assert len(triggered) == 1
+        assert triggered[0]["alert"]["id"] == alert.id
+        assert triggered[0]["current_price"] == 1.0855
+    
+    def test_check_candle_alerts_below_triggers(self, tmp_path):
+        """Test that candle alert triggers when close <= threshold (below)."""
+        alert_file = tmp_path / "alerts.json"
+        manager = AlertManager(str(alert_file))
+        
+        alert = manager.create_candle_alert(
+            pair="GBPUSD",
+            interval="5m",
+            direction="below",
+            threshold=1.2500,
+            email="test@example.com",
+            channel="email",
+        )
+        
+        # Create OHLC data with close below threshold
+        candle_data = [
+            {
+                "pair": "GBPUSD",
+                "interval": "5m",
+                "timestamp": datetime.now(timezone.utc),
+                "open": 1.2510,
+                "high": 1.2520,
+                "low": 1.2495,
+                "close": 1.2490,  # Below threshold
+                "volume": 150,
+            }
+        ]
+        
+        triggered = manager.check_candle_alerts(candle_data)
+        
+        assert len(triggered) == 1
+        assert triggered[0]["alert"]["id"] == alert.id
+        assert triggered[0]["current_price"] == 1.2490
+    
+    def test_check_candle_alerts_does_not_trigger_when_condition_not_met(self, tmp_path):
+        """Test that candle alert does not trigger when condition is not met."""
+        alert_file = tmp_path / "alerts.json"
+        manager = AlertManager(str(alert_file))
+        
+        alert = manager.create_candle_alert(
+            pair="EURUSD",
+            interval="15m",
+            direction="above",
+            threshold=1.0850,
+            email="test@example.com",
+            channel="email",
+        )
+        
+        # Create OHLC data with close below threshold
+        candle_data = [
+            {
+                "pair": "EURUSD",
+                "interval": "15m",
+                "timestamp": datetime.now(timezone.utc),
+                "open": 1.0820,
+                "high": 1.0840,
+                "low": 1.0815,
+                "close": 1.0840,  # Below threshold
+                "volume": 100,
+            }
+        ]
+        
+        triggered = manager.check_candle_alerts(candle_data)
+        
+        assert len(triggered) == 0
+    
+    def test_check_candle_alerts_skips_if_candle_already_evaluated(self, tmp_path):
+        """Test that candle alert doesn't trigger twice for same candle."""
+        alert_file = tmp_path / "alerts.json"
+        manager = AlertManager(str(alert_file))
+        
+        alert = manager.create_candle_alert(
+            pair="EURUSD",
+            interval="15m",
+            direction="above",
+            threshold=1.0850,
+            email="test@example.com",
+            channel="email",
+        )
+        
+        candle_time = datetime.now(timezone.utc)
+        candle_data = [
+            {
+                "pair": "EURUSD",
+                "interval": "15m",
+                "timestamp": candle_time,
+                "open": 1.0820,
+                "high": 1.0860,
+                "low": 1.0815,
+                "close": 1.0855,  # Above threshold
+                "volume": 100,
+            }
+        ]
+        
+        # First check should trigger
+        triggered1 = manager.check_candle_alerts(candle_data)
+        assert len(triggered1) == 1
+        
+        # Second check with same candle should not trigger (already evaluated)
+        triggered2 = manager.check_candle_alerts(candle_data)
+        assert len(triggered2) == 0
+
+    def test_candle_alert_at_exact_threshold(self, tmp_path):
+        """Test that alert triggers when close equals threshold exactly."""
+        alert_file = tmp_path / "alerts.json"
+        manager = AlertManager(str(alert_file))
+        
+        # Above direction
+        alert_above = manager.create_candle_alert(
+            pair="EURUSD",
+            interval="15m",
+            direction="above",
+            threshold=1.0850,
+            email="test@example.com",
+            channel="email",
+        )
+        
+        candle_data = [
+            {
+                "pair": "EURUSD",
+                "interval": "15m",
+                "timestamp": datetime.now(timezone.utc),
+                "open": 1.0820,
+                "high": 1.0860,
+                "low": 1.0815,
+                "close": 1.0850,  # Exactly at threshold
+                "volume": 100,
+            }
+        ]
+        
+        triggered = manager.check_candle_alerts(candle_data)
+        assert len(triggered) == 1  # Should trigger (close >= threshold)
+
+    def test_multiple_candle_alerts_simultaneous(self, tmp_path):
+        """Test multiple candle alerts evaluated at same time."""
+        alert_file = tmp_path / "alerts.json"
+        manager = AlertManager(str(alert_file))
+        
+        alert1 = manager.create_candle_alert(
+            pair="EURUSD",
+            interval="15m",
+            direction="above",
+            threshold=1.0850,
+            email="test@example.com",
+            channel="email",
+        )
+        
+        alert2 = manager.create_candle_alert(
+            pair="GBPUSD",
+            interval="5m",
+            direction="below",
+            threshold=1.2500,
+            email="test@example.com",
+            channel="email",
+        )
+        
+        candle_data = [
+            {
+                "pair": "EURUSD",
+                "interval": "15m",
+                "timestamp": datetime.now(timezone.utc),
+                "close": 1.0855,
+            },
+            {
+                "pair": "GBPUSD",
+                "interval": "5m",
+                "timestamp": datetime.now(timezone.utc),
+                "close": 1.2490,
+            }
+        ]
+        
+        triggered = manager.check_candle_alerts(candle_data)
+        assert len(triggered) == 2
+
+
+class TestCandleAlertBackwardCompatibility:
+    """Test backward compatibility with legacy price alerts."""
+    
+    def test_create_legacy_price_alert(self, tmp_path):
+        """Test that legacy price alerts still work."""
+        alert_file = tmp_path / "alerts.json"
+        manager = AlertManager(str(alert_file))
+        
+        alert = manager.create_alert(
+            pair="EURUSD",
+            target_price=1.0850,
+            condition="above",
+            email="test@example.com",
+            channel="email",
+        )
+        
+        assert alert.alert_type == "price"
+        assert alert.target_price == 1.0850
+        assert alert.condition == "above"
+    
+    def test_load_legacy_alerts_without_alert_type(self, tmp_path):
+        """Test that alerts without alert_type field default to 'price'."""
+        import json
+        
+        alert_file = tmp_path / "alerts.json"
+        
+        # Write legacy alert data (without alert_type field)
+        legacy_data = {
+            "alert-123": {
+                "id": "alert-123",
+                "pair": "EURUSD",
+                "target_price": 1.0850,
+                "condition": "above",
+                "status": "active",
+                "created_at": "2024-01-15T10:30:00",
+                "email": "test@example.com",
+                "channel": "email",
+                "phone": "",
+                "custom_message": "",
+                "triggered_at": None,
+                "last_checked_price": None,
+                # Note: no alert_type field
+            }
+        }
+        
+        with open(alert_file, "w") as f:
+            json.dump(legacy_data, f)
+        
+        # Load with AlertManager
+        manager = AlertManager(str(alert_file))
+        
+        assert len(manager.alerts) == 1
+        alert = manager.alerts["alert-123"]
+        assert alert.alert_type == "price"  # Should default to "price"
+
+    def test_price_alert_evaluation_still_works(self, tmp_path):
+        """Test that price alerts are still evaluated correctly."""
+        alert_file = tmp_path / "alerts.json"
+        manager = AlertManager(str(alert_file))
+        
+        alert = manager.create_alert(
+            pair="EURUSD",
+            target_price=1.0850,
+            condition="above",
+            email="test@example.com",
+            channel="email",
+        )
+        
+        pairs_data = [
+            {"pair": "EURUSD", "price": "1.0860"},
+            {"pair": "GBPUSD", "price": "1.2500"}
+        ]
+        
+        triggered = manager.check_alerts(pairs_data)
+        assert len(triggered) == 1
+        assert triggered[0]["alert"]["id"] == alert.id
+
+
+class TestCandleAlertNormalization:
+    """Test pair name normalization in candle alerts."""
+    
+    def test_pair_normalization_in_candle_alerts(self, tmp_path):
+        """Test that pair names are normalized consistently."""
+        alert_file = tmp_path / "alerts.json"
+        manager = AlertManager(str(alert_file))
+        
+        alert = manager.create_candle_alert(
+            pair="EUR/USD",  # With slash
+            interval="15m",
+            direction="above",
+            threshold=1.0850,
+            email="test@example.com",
+            channel="email",
+        )
+        
+        candle_data = [
+            {
+                "pair": "EURUSD",  # Without slash
+                "interval": "15m",
+                "timestamp": datetime.now(timezone.utc),
+                "open": 1.0820,
+                "high": 1.0860,
+                "low": 1.0815,
+                "close": 1.0855,
+                "volume": 100,
+            }
+        ]
+        
+        triggered = manager.check_candle_alerts(candle_data)
+        
+        # Should match despite different pair formats
+        assert len(triggered) == 1
+
+
+class TestPersistenceAndRecovery:
+    """Test alert persistence and recovery."""
+    
+    def test_candle_alert_persistence(self, tmp_path):
+        """Test that candle alerts are persisted to file."""
+        alert_file = tmp_path / "alerts.json"
+        
+        # Create alert
+        manager1 = AlertManager(str(alert_file))
+        alert1 = manager1.create_candle_alert(
+            pair="EURUSD",
+            interval="15m",
+            direction="above",
+            threshold=1.0850,
+            email="test@example.com",
+            channel="email",
+        )
+        
+        # Load in new manager
+        manager2 = AlertManager(str(alert_file))
+        loaded_alert = manager2.get_alert(alert1.id)
+        
+        assert loaded_alert is not None
+        assert loaded_alert.alert_type == "candle_close"
+        assert loaded_alert.interval == "15m"
+        assert loaded_alert.threshold == 1.0850
+
+    def test_alert_triggered_state_persisted(self, tmp_path):
+        """Test that triggered alert state is persisted."""
+        alert_file = tmp_path / "alerts.json"
+        manager = AlertManager(str(alert_file))
+        
+        alert = manager.create_candle_alert(
+            pair="EURUSD",
+            interval="15m",
+            direction="above",
+            threshold=1.0850,
+            email="test@example.com",
+            channel="email",
+        )
+        
+        candle_data = [
+            {
+                "pair": "EURUSD",
+                "interval": "15m",
+                "timestamp": datetime.now(timezone.utc),
+                "close": 1.0855,
+            }
+        ]
+        
+        triggered = manager.check_candle_alerts(candle_data)
+        assert len(triggered) == 1
+        
+        # Reload and verify state
+        manager2 = AlertManager(str(alert_file))
+        reloaded = manager2.get_alert(alert.id)
+        assert reloaded.status == "triggered"
+        assert reloaded.last_checked_price == 1.0855
+
+
+class TestAlertChannels:
+    """Test alert channels for candle alerts."""
+    
+    def test_candle_alert_email_channel(self, tmp_path):
+        """Test candle alert with email channel."""
+        alert_file = tmp_path / "alerts.json"
+        manager = AlertManager(str(alert_file))
+        
+        alert = manager.create_candle_alert(
+            pair="EURUSD",
+            interval="15m",
+            direction="above",
+            threshold=1.0850,
+            email="test@example.com",
+            channel="email",
+        )
+        
+        assert alert.channel == "email"
+        assert alert.email == "test@example.com"
+        assert alert.phone == ""
+
+    def test_candle_alert_sms_channel(self, tmp_path):
+        """Test candle alert with SMS channel."""
+        alert_file = tmp_path / "alerts.json"
+        manager = AlertManager(str(alert_file))
+        
+        alert = manager.create_candle_alert(
+            pair="EURUSD",
+            interval="15m",
+            direction="above",
+            threshold=1.0850,
+            channel="sms",
+            phone="+1234567890",
+        )
+        
+        assert alert.channel == "sms"
+        assert alert.phone == "+1234567890"
+
+    def test_candle_alert_call_channel(self, tmp_path):
+        """Test candle alert with call channel."""
+        alert_file = tmp_path / "alerts.json"
+        manager = AlertManager(str(alert_file))
+        
+        alert = manager.create_candle_alert(
+            pair="EURUSD",
+            interval="15m",
+            direction="above",
+            threshold=1.0850,
+            channel="call",
+            phone="+1234567890",
+        )
+        
+        assert alert.channel == "call"
+        assert alert.phone == "+1234567890"
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

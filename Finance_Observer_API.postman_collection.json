@@ -79,7 +79,7 @@
                   "key": "pair",
                   "value": "EURUSD",
                   "disabled": true,
-                  "description": "Optional: filter by currency pair (e.g., EURUSD)"
+                  "description": "Optional: filter by currency pair (e.g., EURUSD or EUR/USD)"
                 },
                 {
                   "key": "start",
@@ -127,7 +127,7 @@
                 {
                   "key": "pair",
                   "value": "EURUSD",
-                  "description": "Required: currency pair (e.g., EURUSD, GBPUSD)"
+                  "description": "Required: currency pair (supports EURUSD or EUR/USD format)"
                 },
                 {
                   "key": "interval",
@@ -153,7 +153,7 @@
                 }
               ]
             },
-            "description": "Get OHLC candlestick data aggregated by time interval (5m, 1h, 1d, etc.)"
+            "description": "Get OHLC candlestick data aggregated by time interval (5m, 1h, 1d, etc.). Pair supports both slash and non-slash formats (e.g., EURUSD or EUR/USD)."
           },
           "response": []
         },
@@ -192,7 +192,7 @@
     },
     {
       "name": "Alerts API",
-      "description": "Endpoints for managing price alerts",
+      "description": "Endpoints for managing price alerts and candle-close threshold alerts",
       "item": [
         {
           "name": "Get All Alerts",
@@ -214,7 +214,7 @@
           "response": []
         },
         {
-          "name": "Create Alert",
+          "name": "Create Price Alert (Email)",
           "request": {
             "method": "POST",
             "header": [
@@ -229,19 +229,19 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"pair\": \"EURUSD\",\n  \"target_price\": 1.0850,\n  \"condition\": \"above\",\n  \"channel\": \"email\",\n  \"email\": \"user@example.com\",\n  \"phone\": \"\",\n  \"custom_message\": \"EUR/USD reached important level\"\n}"
+              "raw": "{\n  \"pair\": \"EURUSD\",\n  \"target_price\": 1.0850,\n  \"condition\": \"above\",\n  \"channel\": \"email\",\n  \"email\": \"user@example.com\",\n  \"phone\": \"\",\n  \"custom_message\": \"EUR/USD reached important level\",\n  \"alert_type\": \"price\"\n}"
             },
             "url": {
               "raw": "{{api_base}}/alerts",
               "host": ["{{base_url}}", "api", "v1"],
               "path": ["alerts"]
             },
-            "description": "Create a new price alert. Supports email, SMS, and call channels."
+            "description": "Create a new price alert (live-based). Triggers when current snapshot price meets condition."
           },
           "response": []
         },
         {
-          "name": "Create Alert (SMS)",
+          "name": "Create Price Alert (SMS)",
           "request": {
             "method": "POST",
             "header": [
@@ -256,7 +256,7 @@
             ],
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"pair\": \"GBPUSD\",\n  \"target_price\": 1.2700,\n  \"condition\": \"below\",\n  \"channel\": \"sms\",\n  \"email\": \"\",\n  \"phone\": \"+1234567890\",\n  \"custom_message\": \"GBP/USD dropped below target\"\n}"
+              "raw": "{\n  \"pair\": \"GBPUSD\",\n  \"target_price\": 1.2700,\n  \"condition\": \"below\",\n  \"channel\": \"sms\",\n  \"email\": \"\",\n  \"phone\": \"+1234567890\",\n  \"custom_message\": \"GBP/USD dropped below target\",\n  \"alert_type\": \"price\"\n}"
             },
             "url": {
               "raw": "{{api_base}}/alerts",
@@ -267,33 +267,141 @@
           },
           "response": []
         },
-          {
-            "name": "Create Alert (Call)",
-            "request": {
-              "method": "POST",
-              "header": [
-                {
-                  "key": "Content-Type",
-                  "value": "application/json"
-                },
-                {
-                  "key": "Accept",
-                  "value": "application/json"
-                }
-              ],
-              "body": {
-                "mode": "raw",
-                "raw": "{\n  \"pair\": \"EURUSD\",\n  \"target_price\": 1.0900,\n  \"condition\": \"above\",\n  \"channel\": \"call\",\n  \"email\": \"\",\n  \"phone\": \"+1234567890\",\n  \"custom_message\": \"EUR/USD hit your target\"\n}"
+        {
+          "name": "Create Price Alert (Call)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
               },
-              "url": {
-                "raw": "{{api_base}}/alerts",
-                "host": ["{{base_url}}", "api", "v1"],
-                "path": ["alerts"]
-              },
-              "description": "Create a call price alert (requires Twilio credentials)"
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"pair\": \"EURUSD\",\n  \"target_price\": 1.0900,\n  \"condition\": \"above\",\n  \"channel\": \"call\",\n  \"email\": \"\",\n  \"phone\": \"+1234567890\",\n  \"custom_message\": \"EUR/USD hit your target\",\n  \"alert_type\": \"price\"\n}"
             },
-            "response": []
+            "url": {
+              "raw": "{{api_base}}/alerts",
+              "host": ["{{base_url}}", "api", "v1"],
+              "path": ["alerts"]
+            },
+            "description": "Create a call price alert (requires Twilio credentials)"
           },
+          "response": []
+        },
+        {
+          "name": "Create Candle-Close Alert (Above, Email)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"pair\": \"EURUSD\",\n  \"interval\": \"15m\",\n  \"direction\": \"above\",\n  \"threshold\": 1.0850,\n  \"channel\": \"email\",\n  \"email\": \"user@example.com\",\n  \"phone\": \"\",\n  \"custom_message\": \"15m candle closed above 1.0850\",\n  \"alert_type\": \"candle_close\"\n}"
+            },
+            "url": {
+              "raw": "{{api_base}}/alerts",
+              "host": ["{{base_url}}", "api", "v1"],
+              "path": ["alerts"]
+            },
+            "description": "Create a candle-close threshold alert (email). Triggers when a fully closed candle's close price is above the threshold. Checked every 30 seconds against PostgreSQL OHLC data."
+          },
+          "response": []
+        },
+        {
+          "name": "Create Candle-Close Alert (Below, Email)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"pair\": \"GBPUSD\",\n  \"interval\": \"5m\",\n  \"direction\": \"below\",\n  \"threshold\": 1.2500,\n  \"channel\": \"email\",\n  \"email\": \"trader@example.com\",\n  \"phone\": \"\",\n  \"custom_message\": \"5m candle closed below 1.2500\",\n  \"alert_type\": \"candle_close\"\n}"
+            },
+            "url": {
+              "raw": "{{api_base}}/alerts",
+              "host": ["{{base_url}}", "api", "v1"],
+              "path": ["alerts"]
+            },
+            "description": "Create a candle-close alert (below threshold). Triggers only once per candle when close <= threshold."
+          },
+          "response": []
+        },
+        {
+          "name": "Create Candle-Close Alert (Above, SMS)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"pair\": \"USDJPY\",\n  \"interval\": \"1h\",\n  \"direction\": \"above\",\n  \"threshold\": 150.00,\n  \"channel\": \"sms\",\n  \"email\": \"\",\n  \"phone\": \"+1234567890\",\n  \"custom_message\": \"1h candle above 150.00\",\n  \"alert_type\": \"candle_close\"\n}"
+            },
+            "url": {
+              "raw": "{{api_base}}/alerts",
+              "host": ["{{base_url}}", "api", "v1"],
+              "path": ["alerts"]
+            },
+            "description": "Create a candle-close SMS alert. Supported intervals: 1m, 5m, 15m, 30m, 1h, 4h, 1d"
+          },
+          "response": []
+        },
+        {
+          "name": "Create Candle-Close Alert (Below, Call)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"pair\": \"AUDUSD\",\n  \"interval\": \"30m\",\n  \"direction\": \"below\",\n  \"threshold\": 0.6700,\n  \"channel\": \"call\",\n  \"email\": \"\",\n  \"phone\": \"+1234567890\",\n  \"custom_message\": \"30m candle below 0.6700\",\n  \"alert_type\": \"candle_close\"\n}"
+            },
+            "url": {
+              "raw": "{{api_base}}/alerts",
+              "host": ["{{base_url}}", "api", "v1"],
+              "path": ["alerts"]
+            },
+            "description": "Create a candle-close call alert. One-shot trigger per candle (won't repeat for same candle)."
+          },
+          "response": []
+        },
         {
           "name": "Get Specific Alert",
           "request": {
@@ -309,7 +417,7 @@
               "host": ["{{base_url}}", "api", "v1"],
               "path": ["alerts", "{{alert_id}}"]
             },
-            "description": "Get details of a specific alert by ID"
+            "description": "Get details of a specific alert by ID. Returns both price and candle-close alert types."
           },
           "response": []
         },
@@ -328,7 +436,7 @@
               "host": ["{{base_url}}", "api", "v1"],
               "path": ["alerts", "{{alert_id}}"]
             },
-            "description": "Delete an alert by ID"
+            "description": "Delete an alert by ID (works for all alert types)"
           },
           "response": []
         }
@@ -336,10 +444,10 @@
     },
     {
       "name": "Examples & Test Scenarios",
-      "description": "Example requests and common test scenarios",
+      "description": "Example requests and common test scenarios for both price and candle-close alerts",
       "item": [
         {
-          "name": "Test Workflow - Create & Monitor Alert",
+          "name": "Test Workflow - Price Alert",
           "request": {
             "method": "GET",
             "header": [],
@@ -348,7 +456,276 @@
               "host": ["{{base_url}}"],
               "path": ["snapshot"]
             },
-            "description": "1. Get current snapshot to see available pairs and prices\n2. Create an alert above/below current price\n3. Monitor via WebSocket for real-time updates\n4. Query historical data to verify archival"
+            "description": "WORKFLOW: Price Alert\n1. Get current snapshot to see available pairs and prices\n2. Create a price alert above/below current price\n3. Monitor via WebSocket for real-time updates (triggers on live data)\n4. Query alerts to see trigger status"
+          },
+          "response": []
+        },
+        {
+          "name": "Test Workflow - Candle-Close Alert",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{base_url}}/historical/ohlc?pair=EURUSD&interval=15m&limit=5",
+              "host": ["{{base_url}}"],
+              "path": ["historical", "ohlc"],
+              "query": [
+                {
+                  "key": "pair",
+                  "value": "EURUSD"
+                },
+                {
+                  "key": "interval",
+                  "value": "15m"
+                },
+                {
+                  "key": "limit",
+                  "value": "5"
+                }
+              ]
+            },
+            "description": "WORKFLOW: Candle-Close Alert\n1. Query OHLC data to see recent candle closes and prices\n2. Create a candle-close alert at a specific threshold\n3. Monitoring loop checks every 30 seconds for fully closed candles\n4. Alert triggers only once when matching candle close is detected\n5. Check alerts to confirm trigger status and evaluation timestamp"
+          },
+          "response": []
+        },
+        {
+          "name": "Test - Query OHLC 1m (EUR/USD Format)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/historical/ohlc?pair=EUR%2FUSD&interval=1m&limit=10",
+              "host": ["{{base_url}}"],
+              "path": ["historical", "ohlc"],
+              "query": [
+                {
+                  "key": "pair",
+                  "value": "EUR/USD"
+                },
+                {
+                  "key": "interval",
+                  "value": "1m"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                }
+              ]
+            },
+            "description": "Verify slash-format pair support by querying 1m OHLC with EUR/USD."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Response contains candles array', function () {",
+                  "  pm.expect(json).to.have.property('candles');",
+                  "  pm.expect(json.candles).to.be.an('array');",
+                  "});",
+                  "pm.test('At least one 1m candle returned', function () {",
+                  "  pm.expect(json.count).to.be.above(0);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Test - Create Candle Alert Above & Monitor",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"pair\": \"EURUSD\",\n  \"interval\": \"15m\",\n  \"direction\": \"above\",\n  \"threshold\": 1.0850,\n  \"channel\": \"email\",\n  \"email\": \"test@example.com\",\n  \"custom_message\": \"Test: 15m candle closed above 1.0850\",\n  \"alert_type\": \"candle_close\"\n}"
+            },
+            "url": {
+              "raw": "{{api_base}}/alerts",
+              "host": ["{{base_url}}", "api", "v1"],
+              "path": ["alerts"]
+            },
+            "description": "Create a test candle-close alert (above). After creation, the monitoring task will check this alert every 30 seconds against the latest fully closed 15m candle."
+          },
+          "response": []
+        },
+        {
+          "name": "Test - Create Candle Alert Below & Monitor",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"pair\": \"GBPUSD\",\n  \"interval\": \"5m\",\n  \"direction\": \"below\",\n  \"threshold\": 1.2400,\n  \"channel\": \"email\",\n  \"email\": \"test@example.com\",\n  \"custom_message\": \"Test: 5m candle closed below 1.2400\",\n  \"alert_type\": \"candle_close\"\n}"
+            },
+            "url": {
+              "raw": "{{api_base}}/alerts",
+              "host": ["{{base_url}}", "api", "v1"],
+              "path": ["alerts"]
+            },
+            "description": "Create a test candle-close alert (below). Will trigger on the first fully closed 5m candle if close <= 1.2400."
+          },
+          "response": []
+        },
+        {
+          "name": "Test - Query OHLC 15m (Verify Candles)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/historical/ohlc?pair=EURUSD&interval=15m&limit=10",
+              "host": ["{{base_url}}"],
+              "path": ["historical", "ohlc"],
+              "query": [
+                {
+                  "key": "pair",
+                  "value": "EURUSD"
+                },
+                {
+                  "key": "interval",
+                  "value": "15m"
+                },
+                {
+                  "key": "limit",
+                  "value": "10"
+                }
+              ]
+            },
+            "description": "Verify that 15m candles are being built correctly with proper interval bucketing. Check that close values align with alert thresholds."
+          },
+          "response": []
+        },
+        {
+          "name": "Test - Query OHLC 5m (Verify Granularity)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/historical/ohlc?pair=GBPUSD&interval=5m&limit=20",
+              "host": ["{{base_url}}"],
+              "path": ["historical", "ohlc"],
+              "query": [
+                {
+                  "key": "pair",
+                  "value": "GBPUSD"
+                },
+                {
+                  "key": "interval",
+                  "value": "5m"
+                },
+                {
+                  "key": "limit",
+                  "value": "20"
+                }
+              ]
+            },
+            "description": "Query 5m candles. Multi-minute interval bucketing was fixed to use epoch-based bucketing instead of DATE_TRUNC."
+          },
+          "response": []
+        },
+        {
+          "name": "Test - Create Multiple Alert Types (Mixed)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"pair\": \"EURUSD\",\n  \"target_price\": 1.0880,\n  \"condition\": \"above\",\n  \"channel\": \"email\",\n  \"email\": \"test@example.com\",\n  \"custom_message\": \"Live price alert above 1.0880\",\n  \"alert_type\": \"price\"\n}"
+            },
+            "url": {
+              "raw": "{{api_base}}/alerts",
+              "host": ["{{base_url}}", "api", "v1"],
+              "path": ["alerts"]
+            },
+            "description": "Create a price alert alongside candle-close alerts. Both types coexist and evaluate independently."
+          },
+          "response": []
+        },
+        {
+          "name": "Test - Verify All Alerts Created",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{api_base}}/alerts",
+              "host": ["{{base_url}}", "api", "v1"],
+              "path": ["alerts"]
+            },
+            "description": "List all created alerts. Check for:\n- Both price and candle_close alert types\n- Active status before trigger\n- Different channels (email, sms, call)\n- Correct pair/interval/threshold values"
+          },
+          "response": []
+        },
+        {
+          "name": "Test - Different Intervals (1h, 4h, 1d)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/historical/ohlc?pair=EURUSD&interval=1h&limit=20",
+              "host": ["{{base_url}}"],
+              "path": ["historical", "ohlc"],
+              "query": [
+                {
+                  "key": "pair",
+                  "value": "EURUSD"
+                },
+                {
+                  "key": "interval",
+                  "value": "1h"
+                },
+                {
+                  "key": "limit",
+                  "value": "20"
+                }
+              ]
+            },
+            "description": "Test other supported intervals: 1h, 4h, 1d. Supported intervals are: 1m, 5m, 15m, 30m, 1h, 4h, 1d"
           },
           "response": []
         },
@@ -400,31 +777,57 @@
                 }
               ]
             },
-            "description": "Get historical data for a specific pair (EURUSD)"
+            "description": "Get historical data for a specific pair (EURUSD or EUR/USD)"
           },
           "response": []
         },
         {
-          "name": "Create Multiple Alerts",
+          "name": "Historical Data - Single Pair (EUR/USD Format)",
           "request": {
-            "method": "POST",
-            "header": [
-              {
-                "key": "Content-Type",
-                "value": "application/json"
-              }
-            ],
-            "body": {
-              "mode": "raw",
-              "raw": "{\n  \"pair\": \"USDJPY\",\n  \"target_price\": 150.00,\n  \"condition\": \"above\",\n  \"channel\": \"email\",\n  \"email\": \"alerts@example.com\",\n  \"custom_message\": \"USD/JPY above 150\"\n}"
-            },
+            "method": "GET",
+            "header": [],
             "url": {
-              "raw": "{{api_base}}/alerts",
-              "host": ["{{base_url}}", "api", "v1"],
-              "path": ["alerts"]
+              "raw": "{{base_url}}/historical?pair=EUR%2FUSD&limit=50&order=asc",
+              "host": ["{{base_url}}"],
+              "path": ["historical"],
+              "query": [
+                {b
+                  "key": "pair",
+                  "value": "EUR/USD"
+                },
+                {
+                  "key": "limit",
+                  "value": "50"
+                },
+                {
+                  "key": "order",
+                  "value": "asc"
+                }
+              ]
             },
-            "description": "Create another alert to test multiple active alerts"
+            "description": "Get historical data using slash-format pair to validate normalization compatibility."
           },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Response contains items array', function () {",
+                  "  pm.expect(json).to.have.property('items');",
+                  "  pm.expect(json.items).to.be.an('array');",
+                  "});",
+                  "pm.test('At least one historical row returned', function () {",
+                  "  pm.expect(json.count).to.be.above(0);",
+                  "});"
+                ]
+              }
+            }
+          ],
           "response": []
         }
       ]

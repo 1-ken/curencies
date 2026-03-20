@@ -632,6 +632,10 @@ async def alert_monitoring_task():
     
     Only processes alerts when the forex market is open (24/5 operation).
     Market hours: Sunday 22:00 UTC - Friday 22:00 UTC
+    
+    Handles both:
+    - Price alerts (live-based, from streaming data)
+    - Candle-close alerts (fully closed OHLC from PostgreSQL, checked periodically)
     """
     logger.info("Alert monitoring task started (with forex market hours restrictions)")
     
@@ -670,6 +674,9 @@ async def alert_monitoring_task():
     data_subscribers.append(data_queue)
     logger.info(f"Alert monitor subscribed to data stream (total subscribers: {len(data_subscribers)})")
     
+    last_candle_check = 0.0
+    candle_check_interval = 30.0  # Check candle alerts every 30 seconds
+    
     try:
         while True:
             try:
@@ -682,13 +689,13 @@ async def alert_monitoring_task():
                 # Market is open - wait for data with timeout
                 data = await asyncio.wait_for(data_queue.get(), timeout=5.0)
                 
-                # Check price alerts
+                # ===== Check PRICE alerts (from live stream) =====
                 triggered_alerts = await asyncio.to_thread(
                     alert_manager.check_alerts,
                     data.get("pairs", []),
                 )
                 if triggered_alerts:
-                    logger.warning("Triggered %s alert(s)", len(triggered_alerts))
+                    logger.warning("Triggered %s price alert(s)", len(triggered_alerts))
                     for alert_data in triggered_alerts:
                         alert = alert_data["alert"]
                         current_price = alert_data["current_price"]
@@ -724,6 +731,71 @@ async def alert_monitoring_task():
                                 condition=alert["condition"],
                                 custom_message=alert.get("custom_message", ""),
                             )
+                
+                # ===== Check CANDLE-CLOSE alerts (from PostgreSQL, on timer) =====
+                now = time.monotonic()
+                if postgres_service and (now - last_candle_check) >= candle_check_interval:
+                    last_candle_check = now
+                    try:
+                        # Get all active candle-close alerts
+                        candle_alerts = [
+                            a for a in alert_manager.get_active_alerts()
+                            if a.alert_type == "candle_close"
+                        ]
+                        
+                        if candle_alerts:
+                            # Fetch latest closed candles for all alerts
+                            candle_data = await postgres_service.get_latest_closed_candles_for_alerts([
+                                {"pair": a.pair, "interval": a.interval}
+                                for a in candle_alerts
+                            ])
+                            
+                            # Check and dispatch candle alerts
+                            triggered_candle_alerts = await asyncio.to_thread(
+                                alert_manager.check_candle_alerts,
+                                candle_data,
+                            )
+                            
+                            if triggered_candle_alerts:
+                                logger.warning("Triggered %s candle alert(s)", len(triggered_candle_alerts))
+                                for alert_data in triggered_candle_alerts:
+                                    alert = alert_data["alert"]
+                                    current_price = alert_data["current_price"]
+                                    channel = alert.get("channel", "email")
+                                    
+                                    if channel == "sms" and sms_service and alert.get("phone"):
+                                        await _run_alert_action(
+                                            sms_service.send_price_alert,
+                                            to_phone=alert["phone"],
+                                            pair=alert["pair"],
+                                            target_price=alert["threshold"],
+                                            current_price=current_price,
+                                            condition=alert["direction"],
+                                            custom_message=alert.get("custom_message", ""),
+                                        )
+                                    elif channel == "call" and call_service and alert.get("phone"):
+                                        await _run_alert_action(
+                                            call_service.send_price_alert,
+                                            to_phone=alert["phone"],
+                                            pair=alert["pair"],
+                                            target_price=alert["threshold"],
+                                            current_price=current_price,
+                                            condition=alert["direction"],
+                                            custom_message=alert.get("custom_message", ""),
+                                        )
+                                    elif channel == "email" and email_service and alert.get("email"):
+                                        await _run_alert_action(
+                                            email_service.send_price_alert,
+                                            to_email=alert["email"],
+                                            pair=alert["pair"],
+                                            target_price=alert["threshold"],
+                                            current_price=current_price,
+                                            condition=alert["direction"],
+                                            custom_message=alert.get("custom_message", ""),
+                                        )
+                    except Exception as e:
+                        logger.error(f"Error checking candle alerts: {e}")
+                        
             except asyncio.TimeoutError:
                 # Queue timeout only when market is open - data stream may be slow
                 logger.debug("Alert monitor: no data received within 5s (market may be busy)")
