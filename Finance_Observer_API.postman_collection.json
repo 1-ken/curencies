@@ -71,7 +71,7 @@
               }
             ],
             "url": {
-              "raw": "{{base_url}}/historical?pair=EURUSD&start=2026-02-18T00:00:00Z&end=2026-02-18T23:59:59Z&limit=500&order=desc",
+              "raw": "{{base_url}}/historical?pair=EURUSD&start=2026-03-18T00:00:00Z&end=2026-03-18T23:59:59Z&limit=500&order=desc",
               "host": ["{{base_url}}"],
               "path": ["historical"],
               "query": [
@@ -83,13 +83,13 @@
                 },
                 {
                   "key": "start",
-                  "value": "2026-02-18T00:00:00Z",
+                  "value": "2026-03-18T00:00:00Z",
                   "disabled": true,
                   "description": "Optional: start date-time (ISO 8601)"
                 },
                 {
                   "key": "end",
-                  "value": "2026-02-18T23:59:59Z",
+                  "value": "2026-03-18T23:59:59Z",
                   "disabled": true,
                   "description": "Optional: end date-time (ISO 8601)"
                 },
@@ -105,7 +105,50 @@
                 }
               ]
             },
-            "description": "Query historical data stored in PostgreSQL"
+            "description": "Query historical data stored in PostgreSQL (responses are limited to the most recent 14 days)."
+          },
+          "response": []
+        },
+        {
+          "name": "Query Historical Stream Metrics",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/historical/stream-metrics?start=2026-03-18T00:00:00Z&end=2026-03-20T23:59:59Z&limit=500&order=desc",
+              "host": ["{{base_url}}"],
+              "path": ["historical", "stream-metrics"],
+              "query": [
+                {
+                  "key": "start",
+                  "value": "2026-03-18T00:00:00Z",
+                  "disabled": true,
+                  "description": "Optional: start date-time (ISO 8601). Values older than 14 days are clamped."
+                },
+                {
+                  "key": "end",
+                  "value": "2026-03-20T23:59:59Z",
+                  "disabled": true,
+                  "description": "Optional: end date-time (ISO 8601)"
+                },
+                {
+                  "key": "limit",
+                  "value": "500",
+                  "description": "Max results (1-5000, default 1000)"
+                },
+                {
+                  "key": "order",
+                  "value": "desc",
+                  "description": "Sort order: 'desc' (default) or 'asc'"
+                }
+              ]
+            },
+            "description": "Query persisted stream metrics (subscriber counts, snapshot failures, and stream status). Responses are limited to the most recent 14 days."
           },
           "response": []
         },
@@ -749,7 +792,7 @@
                 }
               ]
             },
-            "description": "Get recent historical data (no time filter = all archived data)"
+            "description": "Get recent historical data (no time filter = most recent 14 days)."
           },
           "response": []
         },
@@ -777,7 +820,7 @@
                 }
               ]
             },
-            "description": "Get historical data for a specific pair (EURUSD or EUR/USD)"
+            "description": "Get historical data for a specific pair (EURUSD or EUR/USD) within the 14-day retention window."
           },
           "response": []
         },
@@ -791,7 +834,7 @@
               "host": ["{{base_url}}"],
               "path": ["historical"],
               "query": [
-                {b
+                {
                   "key": "pair",
                   "value": "EUR/USD"
                 },

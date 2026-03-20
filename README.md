@@ -101,3 +101,10 @@ Each snapshot payload:
 Notes:
 - `pairs.currencies` and `pairs.commodities` are always present as arrays (possibly empty).
 - Commodity `pair` is normalized to trader-common symbols (e.g., `XAUUSD`, `NAS100`) and `common_name` contains readable labels (e.g., `Gold`, `Nasdaq 100`).
+
+## Data retention policy
+- Historical and telemetry rows are retained for 14 calendar days.
+- Cleanup runs automatically once per week at market open (`Sunday 22:00 UTC`).
+- Rows older than 14 days are deleted from `historical_prices` and `stream_metrics`.
+- Read APIs `/historical` and `/historical/stream-metrics` are also clamped to the last 14 days.
+- This keeps backtesting focused on recent data while reducing storage usage.

@@ -3,7 +3,7 @@ import asyncio
 import logging
 import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -42,12 +42,43 @@ WS_SEND_TIMEOUT_SECONDS = 3.0
 ALERT_ACTION_TIMEOUT_SECONDS = 8.0
 MAX_SNAPSHOT_FAILURES = 4
 METRICS_PERSIST_INTERVAL_SECONDS = 30.0
+RETENTION_DAYS = 14
+RETENTION_CHECK_INTERVAL_SECONDS = 60.0
+RETENTION_TRIGGER_WEEKDAY_UTC = 6
+RETENTION_TRIGGER_HOUR_UTC = 22
+RETENTION_TRIGGER_MINUTE_WINDOW = 5
 
 snapshot_failure_count = 0
 last_snapshot_ts: Optional[str] = None
 _observer_restart_lock = asyncio.Lock()
 _active_ws_connections = 0
 _last_metrics_persist_at = 0.0
+retention_cleanup_last_run_at: Optional[str] = None
+retention_cleanup_last_result: Dict[str, Any] = {}
+_retention_cleanup_last_run_key: Optional[str] = None
+
+
+def _is_retention_cleanup_window(now_utc: datetime) -> bool:
+    return (
+        now_utc.weekday() == RETENTION_TRIGGER_WEEKDAY_UTC
+        and now_utc.hour == RETENTION_TRIGGER_HOUR_UTC
+        and now_utc.minute < RETENTION_TRIGGER_MINUTE_WINDOW
+    )
+
+
+def _next_retention_cleanup_at(now_utc: datetime) -> datetime:
+    base = now_utc.astimezone(timezone.utc)
+    target = base.replace(
+        hour=RETENTION_TRIGGER_HOUR_UTC,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    days_ahead = (RETENTION_TRIGGER_WEEKDAY_UTC - base.weekday()) % 7
+    target = target + timedelta(days=days_ahead)
+    if target <= base:
+        target = target + timedelta(days=7)
+    return target
 
 
 def _get_active_subscriber_count() -> int:
@@ -340,6 +371,13 @@ async def stream_health():
             "subscriber_count": _get_active_subscriber_count(),
             "ws_subscriber_count": _get_active_subscriber_count(),
             "queue_subscriber_count": len(data_subscribers),
+            "retention_days": RETENTION_DAYS,
+            "retention_cleanup_schedule_utc": "Sunday 22:00",
+            "retention_cleanup_last_run_at": retention_cleanup_last_run_at,
+            "retention_cleanup_next_run_at": _next_retention_cleanup_at(
+                datetime.now(timezone.utc)
+            ).isoformat(),
+            "retention_cleanup_last_result": retention_cleanup_last_result,
         }
     )
 
@@ -857,6 +895,53 @@ async def archive_snapshots_task():
             await asyncio.sleep(ARCHIVE_INTERVAL)
 
 
+async def retention_cleanup_task():
+    """Background task that applies weekly retention cleanup in PostgreSQL.
+
+    Policy:
+    - Keep only the latest 14 calendar days.
+    - Run cleanup when the new trading week opens (Sunday 22:00 UTC).
+    - Apply to both historical_prices and stream_metrics tables.
+    """
+    global retention_cleanup_last_run_at, retention_cleanup_last_result
+    global _retention_cleanup_last_run_key
+
+    logger.info(
+        "Retention cleanup task started (weekly at Sunday %02d:00 UTC, keep=%d days)",
+        RETENTION_TRIGGER_HOUR_UTC,
+        RETENTION_DAYS,
+    )
+
+    while True:
+        try:
+            if not postgres_service:
+                await asyncio.sleep(RETENTION_CHECK_INTERVAL_SECONDS)
+                continue
+
+            now_utc = datetime.now(timezone.utc)
+            if _is_retention_cleanup_window(now_utc):
+                run_key = now_utc.date().isoformat()
+                if _retention_cleanup_last_run_key != run_key:
+                    deleted = await postgres_service.delete_old_data(RETENTION_DAYS)
+                    retention_cleanup_last_run_at = now_utc.isoformat()
+                    retention_cleanup_last_result = deleted
+                    _retention_cleanup_last_run_key = run_key
+                    logger.info(
+                        "Retention cleanup complete: historical_deleted=%s metrics_deleted=%s retention_days=%s",
+                        deleted.get("historical_deleted", 0),
+                        deleted.get("metrics_deleted", 0),
+                        deleted.get("retention_days", RETENTION_DAYS),
+                    )
+
+            await asyncio.sleep(RETENTION_CHECK_INTERVAL_SECONDS)
+        except asyncio.CancelledError:
+            logger.info("Retention cleanup task cancelled")
+            break
+        except Exception as e:
+            logger.error("Error in retention cleanup task: %s", e)
+            await asyncio.sleep(RETENTION_CHECK_INTERVAL_SECONDS)
+
+
 @router.get("/historical")
 async def historical_data(
     pair: Optional[str] = None,
@@ -869,8 +954,13 @@ async def historical_data(
     if not postgres_service:
         return JSONResponse({"error": "Historical storage not available"}, status_code=503)
 
+    retention_floor = datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS)
     start_dt = _parse_query_datetime(start)
     end_dt = _parse_query_datetime(end)
+    if start_dt is None or start_dt < retention_floor:
+        start_dt = retention_floor
+    if end_dt and end_dt < start_dt:
+        return JSONResponse({"count": 0, "items": []})
     descending = order.lower() != "asc"
     limit = max(1, min(limit, 5000))
 
@@ -886,7 +976,6 @@ async def historical_data(
             "pair": row.pair,
             "price": float(row.price),
             "observed_at": row.observed_at.isoformat(),
-            "source_title": row.source_title,
         }
         for row in rows
     ]
@@ -976,8 +1065,13 @@ async def historical_stream_metrics(
     if not postgres_service:
         return JSONResponse({"error": "Historical storage not available"}, status_code=503)
 
+    retention_floor = datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS)
     start_dt = _parse_query_datetime(start)
     end_dt = _parse_query_datetime(end)
+    if start_dt is None or start_dt < retention_floor:
+        start_dt = retention_floor
+    if end_dt and end_dt < start_dt:
+        return JSONResponse({"count": 0, "items": []})
     descending = order.lower() != "asc"
     limit = max(1, min(limit, 5000))
 

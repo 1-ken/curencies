@@ -25,10 +25,62 @@ class _DataObserver:
         }
 
 
+class _HistoryRow:
+    def __init__(self, pair: str, price: float, observed_at: datetime):
+        self.pair = pair
+        self.price = price
+        self.observed_at = observed_at
+
+
+class _MetricRow:
+    def __init__(
+        self,
+        observed_at: datetime,
+        ws_subscriber_count: int,
+        queue_subscriber_count: int,
+        snapshot_failure_count: int,
+        stream_status: str,
+    ):
+        self.observed_at = observed_at
+        self.ws_subscriber_count = ws_subscriber_count
+        self.queue_subscriber_count = queue_subscriber_count
+        self.snapshot_failure_count = snapshot_failure_count
+        self.stream_status = stream_status
+
+
+class _HistoryPostgresService:
+    def __init__(self):
+        self.last_query_start = None
+        self.last_metrics_query_start = None
+
+    async def query_history(self, pair, start, end, limit, descending):
+        self.last_query_start = start
+        return [
+            _HistoryRow(
+                pair="EURUSD",
+                price=1.1000,
+                observed_at=start,
+            )
+        ]
+
+    async def query_stream_metrics(self, start, end, limit, descending):
+        self.last_metrics_query_start = start
+        return [
+            _MetricRow(
+                observed_at=start,
+                ws_subscriber_count=3,
+                queue_subscriber_count=2,
+                snapshot_failure_count=0,
+                stream_status="healthy",
+            )
+        ]
+
+
 class DataEndpointIntegrationTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self._originals = {
             "observer": data.observer,
+            "postgres_service": data.postgres_service,
             "snapshot_timeout": data.SNAPSHOT_TIMEOUT_SECONDS,
             "stream_interval": data.STREAM_INTERVAL,
             "max_snapshot_failures": data.MAX_SNAPSHOT_FAILURES,
@@ -44,6 +96,7 @@ class DataEndpointIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         data.observer = self._originals["observer"]
+        data.postgres_service = self._originals["postgres_service"]
         data.SNAPSHOT_TIMEOUT_SECONDS = self._originals["snapshot_timeout"]
         data.STREAM_INTERVAL = self._originals["stream_interval"]
         data.MAX_SNAPSHOT_FAILURES = self._originals["max_snapshot_failures"]
@@ -100,6 +153,38 @@ class DataEndpointIntegrationTests(unittest.IsolatedAsyncioTestCase):
         stale_by_age_response = await data.stream_health()
         stale_by_age = json.loads(stale_by_age_response.body)
         self.assertEqual(stale_by_age.get("status"), "stale")
+
+    async def test_historical_data_enforces_14_day_retention_floor(self):
+        fake_pg = _HistoryPostgresService()
+        data.postgres_service = fake_pg
+
+        response = await data.historical_data(start=None, end=None, limit=100)
+
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.body)
+        self.assertEqual(payload.get("count"), 1)
+
+        observed_at = datetime.fromisoformat(payload["items"][0]["observed_at"])
+        cutoff = datetime.now(timezone.utc) - timedelta(days=14)
+        self.assertGreaterEqual(observed_at, cutoff - timedelta(seconds=2))
+        self.assertIsNotNone(fake_pg.last_query_start)
+        self.assertGreaterEqual(fake_pg.last_query_start, cutoff - timedelta(seconds=2))
+
+    async def test_stream_metrics_enforce_14_day_retention_floor(self):
+        fake_pg = _HistoryPostgresService()
+        data.postgres_service = fake_pg
+
+        response = await data.historical_stream_metrics(start=None, end=None, limit=100)
+
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.body)
+        self.assertEqual(payload.get("count"), 1)
+
+        observed_at = datetime.fromisoformat(payload["items"][0]["observed_at"])
+        cutoff = datetime.now(timezone.utc) - timedelta(days=14)
+        self.assertGreaterEqual(observed_at, cutoff - timedelta(seconds=2))
+        self.assertIsNotNone(fake_pg.last_metrics_query_start)
+        self.assertGreaterEqual(fake_pg.last_metrics_query_start, cutoff - timedelta(seconds=2))
 
 
 if __name__ == "__main__":

@@ -1,10 +1,10 @@
 """PostgreSQL integration for historical storage."""
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
-from sqlalchemy import select, text
+from sqlalchemy import delete, select, text
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
@@ -57,6 +57,21 @@ class PostgresService:
                     "Migrated historical_prices.pair column from VARCHAR(%s) to VARCHAR(64)",
                     current_pair_length,
                 )
+            source_title_exists = await conn.scalar(
+                text(
+                    """
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_name = 'historical_prices'
+                      AND column_name = 'source_title'
+                    """
+                )
+            )
+            if source_title_exists:
+                await conn.execute(
+                    text("ALTER TABLE historical_prices DROP COLUMN IF EXISTS source_title")
+                )
+                logger.info("Dropped legacy historical_prices.source_title column")
         logger.info("PostgreSQL schema ensured")
 
     async def insert_snapshots(self, snapshots: Iterable[Dict[str, Any]]) -> int:
@@ -66,7 +81,6 @@ class PostgresService:
         rows: List[HistoricalPrice] = []
         for snapshot in snapshots:
             observed_at = self._parse_timestamp(snapshot.get("ts"))
-            title = snapshot.get("title")
             for pair_data in snapshot.get("pairs", []):
                 pair = self._normalize_pair(pair_data.get("pair"))
                 price = self._parse_price(pair_data.get("price"))
@@ -76,7 +90,6 @@ class PostgresService:
                     HistoricalPrice(
                         pair=pair,
                         price=price,
-                        source_title=title,
                         observed_at=observed_at,
                     )
                 )
@@ -166,6 +179,30 @@ class PostgresService:
         async with self._sessionmaker() as session:
             result = await session.execute(stmt)
             return list(result.scalars().all())
+
+    async def delete_old_data(self, days_to_keep: int = 14) -> Dict[str, int]:
+        if not self._sessionmaker:
+            raise RuntimeError("PostgreSQL session not initialized")
+
+        retention_days = max(1, int(days_to_keep))
+        cutoff = datetime.now(timezone.utc) - timedelta(days=retention_days)
+
+        async with self._sessionmaker() as session:
+            historical_result = await session.execute(
+                delete(HistoricalPrice).where(HistoricalPrice.observed_at < cutoff)
+            )
+            metrics_result = await session.execute(
+                delete(StreamMetric).where(StreamMetric.observed_at < cutoff)
+            )
+            await session.commit()
+
+        historical_deleted = max(0, int(historical_result.rowcount or 0))
+        metrics_deleted = max(0, int(metrics_result.rowcount or 0))
+        return {
+            "historical_deleted": historical_deleted,
+            "metrics_deleted": metrics_deleted,
+            "retention_days": retention_days,
+        }
 
     async def query_ohlc(
         self,

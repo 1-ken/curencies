@@ -59,6 +59,7 @@ alert_manager: AlertManager = AlertManager()
 background_task: asyncio.Task | None = None
 data_stream_task: asyncio.Task | None = None
 archive_task: asyncio.Task | None = None
+cleanup_task: asyncio.Task | None = None
 redis_service: RedisService | None = None
 postgres_service: PostgresService | None = None
 
@@ -88,7 +89,7 @@ else:
 @app.on_event("startup")
 async def on_startup():
     """Initialize the observer on application startup."""
-    global observer, observers, background_task, data_stream_task, archive_task
+    global observer, observers, background_task, data_stream_task, archive_task, cleanup_task
     global redis_service, postgres_service
     logger.info("Starting Finance Observer application...")
     
@@ -185,6 +186,10 @@ async def on_startup():
         if redis_service and postgres_service:
             archive_task = asyncio.create_task(data_endpoints.archive_snapshots_task())
             logger.info("Archive task started")
+
+        if postgres_service:
+          cleanup_task = asyncio.create_task(data_endpoints.retention_cleanup_task())
+          logger.info("Retention cleanup task started")
     except Exception as e:
         logger.error(f"Failed to start observer: {e}")
         raise
@@ -193,7 +198,7 @@ async def on_startup():
 @app.on_event("shutdown")
 async def on_shutdown():
     """Clean up resources on application shutdown."""
-    global background_task, data_stream_task, archive_task
+    global background_task, data_stream_task, archive_task, cleanup_task
     global redis_service, postgres_service
     
     logger.info("Shutting down Finance Observer...")
@@ -225,6 +230,15 @@ async def on_shutdown():
         except asyncio.CancelledError:
             pass
         logger.info("Archive task cancelled")
+
+    if cleanup_task:
+        logger.info("Cancelling retention cleanup task...")
+        cleanup_task.cancel()
+        try:
+            await cleanup_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Retention cleanup task cancelled")
     
     for obs in observers:
         logger.info("Shutting down observer '%s'...", getattr(obs, "source_name", "default"))
@@ -282,6 +296,9 @@ async def health_check():
     )
     checks["alert_task"] = (
         "up" if background_task and not background_task.done() else "down"
+    )
+    checks["cleanup_task"] = (
+        "up" if cleanup_task and not cleanup_task.done() else "unavailable"
     )
     if checks["stream_task"] == "down":
         overall = "down"
