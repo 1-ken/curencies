@@ -429,6 +429,17 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
   }
   .chart-card h3 { font-size: 13px; font-weight: 600; color: var(--muted);
     text-transform: uppercase; letter-spacing: 0.07em; margin-bottom: 12px; }
+  .chart-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+  .chart-head h3 { margin-bottom: 0; }
+  .chart-card.chart-wide { grid-column: 1 / -1; }
+  .perf-controls { display: flex; align-items: center; gap: 8px; }
+  .perf-controls button {
+    border: 1px solid var(--border); background: transparent; color: var(--muted);
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+    padding: 4px 8px; border-radius: 6px; cursor: pointer;
+  }
+  .perf-controls button.active { color: var(--text); border-color: var(--blue); }
+  #perf-summary { font-size: 12px; color: var(--muted); min-width: 140px; text-align: right; }
   .chart-wrap { height: var(--chart-h); position: relative; }
 
   /* ── Pairs table ── */
@@ -506,6 +517,10 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       <span class="label">Snapshot Age</span>
       <span id="c-age" class="value">—</span>
     </div>
+    <div class="status-card">
+      <span class="label">Overall Performance (7d)</span>
+      <span id="c-performance" class="value">—</span>
+    </div>
   </div>
 
   <!-- ── Charts ── -->
@@ -526,14 +541,29 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
       <h3>Subscribers: Live vs Persisted</h3>
       <div class="chart-wrap"><canvas id="chart-subs-persisted"></canvas></div>
     </div>
+    <div class="chart-card chart-wide">
+      <div class="chart-head">
+        <h3>System Performance Trend</h3>
+        <div class="perf-controls">
+          <button id="perf-24h" type="button" data-window="24h">24h</button>
+          <button id="perf-7d" type="button" data-window="7d" class="active">7d</button>
+          <span id="perf-summary">Overall: —</span>
+        </div>
+      </div>
+      <div class="chart-wrap"><canvas id="chart-performance"></canvas></div>
+    </div>
+    <div class="chart-card chart-wide">
+      <h3>Downtime by Hour of Day (UTC)</h3>
+      <div class="chart-wrap"><canvas id="chart-downtime-hour"></canvas></div>
+    </div>
   </div>
 
   <!-- ── FX Pairs table ── -->
   <div class="pairs-card">
-    <h3>Latest FX Snapshot</h3>
+    <h3>Latest Market Snapshot</h3>
     <table>
-      <thead><tr><th>Pair</th><th>Price</th><th>Change %</th></tr></thead>
-      <tbody id="pairs-tbody"><tr><td colspan="3" style="color:var(--muted)">Waiting for snapshot…</td></tr></tbody>
+      <thead><tr><th>Market</th><th>Pair</th><th>Price</th><th>Change %</th></tr></thead>
+      <tbody id="pairs-tbody"><tr><td colspan="4" style="color:var(--muted)">Waiting for snapshot…</td></tr></tbody>
     </table>
   </div>
 
@@ -546,6 +576,10 @@ _DASHBOARD_HTML = """<!DOCTYPE html>
 <script>
 const POINTS = 60;  // rolling window (60 × 5 s = 5 min)
 const POLL_MS = 5000;
+const PERF_POINTS = 1000;
+let wsSocket = null;
+let wsBackoffMs = 1000;
+let wsReconnectTimer = null;
 
 // ── Chart defaults ──────────────────────────────────────────────────────────
 Chart.defaults.color = '#94a3b8';
@@ -648,6 +682,107 @@ const chartSubsPersisted = new Chart(document.getElementById('chart-subs-persist
   }
 });
 
+const chartPerformance = new Chart(document.getElementById('chart-performance').getContext('2d'), {
+  type: 'line',
+  data: {
+    datasets: [
+      {
+        label: 'Overall Performance %',
+        data: [],
+        borderColor: '#22c55e',
+        backgroundColor: '#22c55e1a',
+        borderWidth: 2,
+        pointRadius: 2,
+        pointHoverRadius: 4,
+        tension: 0.25,
+        yAxisID: 'y',
+      },
+      {
+        label: 'Snapshot Failures',
+        data: [],
+        borderColor: '#ef4444',
+        backgroundColor: '#ef44441a',
+        borderWidth: 2,
+        pointRadius: 2,
+        pointHoverRadius: 4,
+        tension: 0.25,
+        yAxisID: 'y1',
+      }
+    ]
+  },
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: { duration: 250 },
+    parsing: false,
+    scales: {
+      x: {
+        type: 'linear',
+        ticks: {
+          maxTicksLimit: 8,
+          callback: (v) => {
+            const d = new Date(Number(v));
+            return d.getMonth() + 1 + '/' + d.getDate() + ' ' +
+                   d.getHours().toString().padStart(2, '0') + ':' +
+                   d.getMinutes().toString().padStart(2, '0');
+          },
+          font: { size: 10 },
+        },
+        grid: { display: false },
+      },
+      y: {
+        min: 0,
+        max: 100,
+        ticks: { font: { size: 10 }, callback: (v) => v + '%' },
+        grid: { color: '#2a2d3e' },
+      },
+      y1: {
+        position: 'right',
+        min: 0,
+        ticks: { font: { size: 10 } },
+        grid: { drawOnChartArea: false },
+      }
+    }
+  }
+});
+
+const chartDowntimeHour = new Chart(document.getElementById('chart-downtime-hour').getContext('2d'), {
+  type: 'bar',
+  data: {
+    labels: Array.from({ length: 24 }, (_, i) => i.toString().padStart(2, '0') + ':00'),
+    datasets: [
+      {
+        label: 'Downtime Events',
+        data: Array(24).fill(0),
+        borderColor: '#f97316',
+        backgroundColor: '#f9731633',
+        borderWidth: 1,
+      }
+    ]
+  },
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: { duration: 250 },
+    plugins: { legend: { display: false } },
+    scales: {
+      x: {
+        ticks: { maxTicksLimit: 12, maxRotation: 0, font: { size: 10 } },
+        grid: { display: false },
+      },
+      y: {
+        min: 0,
+        ticks: { precision: 0, font: { size: 10 } },
+        grid: { color: '#2a2d3e' },
+      }
+    }
+  }
+});
+
+const perfState = {
+  window: '7d',
+};
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 function push(chart, label, value) {
   chart.data.labels.push(label);
@@ -684,6 +819,106 @@ function fmtUptime(s) {
   if (h > 0) return h + 'h ' + m + 'm';
   if (m > 0) return m + 'm ' + sec + 's';
   return sec + 's';
+}
+
+function normalizeRows(data) {
+  if (!data || typeof data !== 'object') {
+    return [];
+  }
+
+  if (Array.isArray(data.pairs)) {
+    return data.pairs.map((row) => ({ ...row, market: row.market || row.source || 'currencies' }));
+  }
+
+  const grouped = data.pairs && typeof data.pairs === 'object' ? data.pairs : {};
+  const currencies = Array.isArray(grouped.currencies)
+    ? grouped.currencies.map((row) => ({ ...row, market: 'currencies' }))
+    : [];
+  const commodities = Array.isArray(grouped.commodities)
+    ? grouped.commodities.map((row) => ({ ...row, market: 'commodities' }))
+    : [];
+
+  return currencies.concat(commodities);
+}
+
+function parseNumber(raw) {
+  if (raw == null) return null;
+  if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+  if (typeof raw !== 'string') return null;
+  const cleaned = raw.replace(/,/g, '').trim();
+  if (!cleaned) return null;
+  const n = Number(cleaned);
+  return Number.isFinite(n) ? n : null;
+}
+
+function performanceFromMetric(metric) {
+  const status = String(metric.stream_status || '').toLowerCase();
+  const failures = Number(metric.snapshot_failure_count ?? 0);
+  const base = status === 'healthy' ? 100 : status === 'degraded' ? 78 : status === 'stale' ? 40 : status === 'market_closed' ? 60 : 70;
+  const penalty = Math.min(Math.max(0, failures) * 5, 50);
+  return Math.max(0, Math.min(100, base - penalty));
+}
+
+function isDowntimeMetric(metric) {
+  const status = String(metric.stream_status || '').toLowerCase();
+  if (status === 'market_closed') {
+    return false;
+  }
+  return status !== 'healthy';
+}
+
+async function resolveWsUrl() {
+  try {
+    const res = await fetch('/client-config');
+    if (res.ok) {
+      const cfg = await res.json();
+      if (cfg && typeof cfg.wsUrl === 'string' && cfg.wsUrl.trim()) {
+        return cfg.wsUrl.trim();
+      }
+    }
+  } catch (_) {}
+
+  const proto = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+  return proto + window.location.host + '/ws/observe';
+}
+
+function scheduleWsReconnect() {
+  if (wsReconnectTimer) return;
+  wsReconnectTimer = setTimeout(() => {
+    wsReconnectTimer = null;
+    connectWs();
+  }, wsBackoffMs);
+  wsBackoffMs = Math.min(wsBackoffMs * 2, 10000);
+}
+
+async function connectWs() {
+  const url = await resolveWsUrl();
+
+  try {
+    wsSocket = new WebSocket(url);
+  } catch (_) {
+    scheduleWsReconnect();
+    return;
+  }
+
+  wsSocket.onopen = () => {
+    wsBackoffMs = 1000;
+  };
+
+  wsSocket.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data);
+      handleMarketPayload(data);
+    } catch (_) {}
+  };
+
+  wsSocket.onclose = () => {
+    scheduleWsReconnect();
+  };
+
+  wsSocket.onerror = () => {
+    try { wsSocket && wsSocket.close(); } catch (_) {}
+  };
 }
 
 // ── Banner ───────────────────────────────────────────────────────────────────
@@ -755,15 +990,6 @@ async function poll() {
     console.warn('Poll error:', err);
   }
 
-  // FX pairs: hit /snapshot (best-effort, skip on error)
-  try {
-    const snap = await fetch('/snapshot');
-    if (snap.ok) {
-      const payload = await snap.json();
-      renderPairs(payload);
-    }
-  } catch (_) {}
-
   // Persisted metrics trend (best-effort)
   try {
     const hist = await fetch('/historical/stream-metrics?limit=60&order=desc');
@@ -774,29 +1000,40 @@ async function poll() {
   } catch (_) {}
 }
 
+function handleMarketPayload(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return;
+  }
+  renderPairs(payload);
+}
+
 function renderPairs(data) {
   const tbody = document.getElementById('pairs-tbody');
   if (!data || typeof data !== 'object') {
-    tbody.innerHTML = '<tr><td colspan="3" style="color:var(--muted)">No data</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="4" style="color:var(--muted)">No data</td></tr>';
     return;
   }
 
-  const rows = Array.isArray(data.pairs) ? data.pairs : [];
+  const rows = normalizeRows(data);
   if (rows.length === 0) {
     const msg = data.error ? 'No fresh snapshot: ' + data.error : 'No pair rows in snapshot';
-    tbody.innerHTML = '<tr><td colspan="3" style="color:var(--muted)">' + msg + '</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="4" style="color:var(--muted)">' + msg + '</td></tr>';
     return;
   }
 
   tbody.innerHTML = rows.map((info) => {
     const pair = info.pair || '—';
-    const price  = info.price  != null ? parseFloat(info.price).toFixed(5)  : '—';
-    const change = info.change != null ? parseFloat(info.change) : null;
+    const market = info.market === 'commodities' ? 'commodities' : 'currencies';
+    const parsedPrice = parseNumber(info.price);
+    const price = parsedPrice != null
+      ? (market === 'currencies' ? parsedPrice.toFixed(5) : parsedPrice.toLocaleString(undefined, { maximumFractionDigits: 4 }))
+      : (info.price ?? '—');
+    const change = parseNumber(info.change);
     const chgCell = change == null ? '<td>—</td>'
       : change >= 0
-        ? '<td class="up-pct">+' + change.toFixed(3) + '%</td>'
-        : '<td class="down-pct">' + change.toFixed(3) + '%</td>';
-    return '<tr><td>' + pair + '</td><td>' + price + '</td>' + chgCell + '</tr>';
+        ? '<td class="up-pct">+' + change.toFixed(2) + '%</td>'
+        : '<td class="down-pct">' + change.toFixed(2) + '%</td>';
+    return '<tr><td>' + market + '</td><td>' + pair + '</td><td>' + price + '</td>' + chgCell + '</tr>';
   }).join('');
 }
 
@@ -822,9 +1059,94 @@ function renderPersistedSubscriberTrend(payload) {
   chartSubsPersisted.update('none');
 }
 
+async function refreshPerformanceChart() {
+  const end = new Date();
+  const start = new Date(end.getTime() - (perfState.window === '24h' ? 24 : 24 * 7) * 60 * 60 * 1000);
+  const query = '/historical/stream-metrics?order=asc&limit=5000&start=' +
+    encodeURIComponent(start.toISOString()) + '&end=' + encodeURIComponent(end.toISOString());
+
+  try {
+    const res = await fetch(query);
+    if (!res.ok) {
+      return;
+    }
+
+    const payload = await res.json();
+    const items = Array.isArray(payload.items) ? payload.items : [];
+
+    const perfPoints = [];
+    const failPoints = [];
+    const downtimeByHour = Array(24).fill(0);
+    let perfSum = 0;
+    let perfCount = 0;
+
+    for (const item of items) {
+      const x = new Date(item.observed_at).getTime();
+      if (!Number.isFinite(x)) continue;
+
+      const score = performanceFromMetric(item);
+      const failures = Number(item.snapshot_failure_count ?? 0);
+
+      perfPoints.push({ x, y: score });
+      failPoints.push({ x, y: Number.isFinite(failures) ? failures : 0 });
+
+      if (isDowntimeMetric(item)) {
+        const hour = new Date(item.observed_at).getUTCHours();
+        if (Number.isInteger(hour) && hour >= 0 && hour < 24) {
+          downtimeByHour[hour] += 1;
+        }
+      }
+
+      perfSum += score;
+      perfCount += 1;
+    }
+
+    if (perfPoints.length > PERF_POINTS) {
+      chartPerformance.data.datasets[0].data = perfPoints.slice(-PERF_POINTS);
+      chartPerformance.data.datasets[1].data = failPoints.slice(-PERF_POINTS);
+    } else {
+      chartPerformance.data.datasets[0].data = perfPoints;
+      chartPerformance.data.datasets[1].data = failPoints;
+    }
+
+    chartPerformance.update('none');
+  chartDowntimeHour.data.datasets[0].data = downtimeByHour;
+  chartDowntimeHour.update('none');
+
+    const overall = perfCount > 0 ? (perfSum / perfCount) : null;
+    const summary = document.getElementById('perf-summary');
+    const card = document.getElementById('c-performance');
+
+    if (overall == null) {
+      summary.textContent = 'Overall: —';
+      card.textContent = '—';
+      card.style.color = 'var(--muted)';
+      return;
+    }
+
+    const label = overall.toFixed(1) + '%';
+    summary.textContent = 'Overall: ' + label;
+    card.textContent = label;
+    card.style.color = overall >= 85 ? 'var(--green)' : overall >= 65 ? 'var(--yellow)' : 'var(--red)';
+  } catch (_) {}
+}
+
+function setPerfWindow(windowKey) {
+  perfState.window = windowKey;
+  document.getElementById('perf-24h').classList.toggle('active', windowKey === '24h');
+  document.getElementById('perf-7d').classList.toggle('active', windowKey === '7d');
+  refreshPerformanceChart();
+}
+
 // ── Boot ──────────────────────────────────────────────────────────────────────
+document.getElementById('perf-24h').addEventListener('click', () => setPerfWindow('24h'));
+document.getElementById('perf-7d').addEventListener('click', () => setPerfWindow('7d'));
+
+connectWs();
 poll();
 setInterval(poll, POLL_MS);
+refreshPerformanceChart();
+setInterval(refreshPerformanceChart, 60000);
 </script>
 </body>
 </html>"""
