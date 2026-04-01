@@ -384,10 +384,36 @@ async def stream_health():
 
 @router.websocket("/ws/observe")
 async def ws_observe(ws: WebSocket):
-    """WebSocket endpoint for streaming real-time forex data."""
+    """WebSocket endpoint for streaming real-time forex data.
+
+    Query params:
+        interval: Optional candle timeframe (default: 1m)
+        pair: Optional currency pair filter (default: all pairs)
+    """
     global _active_ws_connections
     await ws.accept()
     connection_counted = False
+
+    interval = (ws.query_params.get("interval") or "1m").strip().lower()
+    valid_intervals = {"1m", "5m", "15m", "30m", "1h", "4h", "1d"}
+    if interval not in valid_intervals:
+        interval = "1m"
+
+    pair_param = (ws.query_params.get("pair") or "").strip()
+    requested_pair = None
+    if pair_param:
+        requested_pair = pair_param.split(",", 1)[0].strip().upper().replace("/", "") or None
+
+    has_stream_params = (
+        ws.query_params.get("interval") is not None
+        or ws.query_params.get("pair") is not None
+    )
+
+    logger.info(
+        "WebSocket stream requested: interval=%s pair=%s",
+        interval,
+        requested_pair or "all",
+    )
     
     if not _active_observers():
         logger.warning("WebSocket connection but observer not ready")
@@ -412,7 +438,12 @@ async def ws_observe(ws: WebSocket):
             async for data in redis_service.subscribe(stop_event=stop_event):
                 if stop_event.is_set():
                     break
-                data = _attach_alerts(data)
+                data = await _attach_stream_metadata(
+                    data,
+                    interval,
+                    requested_pair,
+                    include_alerts=not has_stream_params,
+                )
                 await asyncio.wait_for(
                     ws.send_json(data),
                     timeout=WS_SEND_TIMEOUT_SECONDS,
@@ -433,7 +464,12 @@ async def ws_observe(ws: WebSocket):
                     data = await asyncio.wait_for(data_queue.get(), timeout=1.0)
                 except asyncio.TimeoutError:
                     continue
-                data = _attach_alerts(data)
+                data = await _attach_stream_metadata(
+                    data,
+                    interval,
+                    requested_pair,
+                    include_alerts=not has_stream_params,
+                )
                 await asyncio.wait_for(
                     ws.send_json(data),
                     timeout=WS_SEND_TIMEOUT_SECONDS,
@@ -498,6 +534,139 @@ def _attach_alerts(data: Dict[str, Any]) -> Dict[str, Any]:
         }
     }
     return clean_data
+
+
+def _normalize_pair_symbol(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    return str(value).upper().replace("/", "").strip()
+
+
+def _interval_to_seconds(interval: str) -> int:
+    interval_map = {
+        "1m": 60,
+        "5m": 300,
+        "15m": 900,
+        "30m": 1800,
+        "1h": 3600,
+        "4h": 14400,
+        "1d": 86400,
+    }
+    return interval_map.get(interval, 60)
+
+
+async def _build_stream_ohlc_for_pair(
+    pair: str,
+    latest_price: Optional[float],
+    interval: str,
+) -> Optional[Dict[str, Any]]:
+    normalized_pair = _normalize_pair_symbol(pair)
+    if not normalized_pair:
+        return None
+
+    interval_seconds = _interval_to_seconds(interval)
+    current_time = datetime.now(timezone.utc)
+    epoch_seconds = current_time.timestamp()
+    bucket_seconds = int(epoch_seconds // interval_seconds) * interval_seconds
+    bucket_time = datetime.fromtimestamp(bucket_seconds, tz=timezone.utc)
+    bucket_end_time = bucket_time + timedelta(seconds=interval_seconds)
+    time_in_bucket = epoch_seconds - bucket_seconds
+    progress_percent = (time_in_bucket / interval_seconds) * 100
+
+    bucket_prices: List[float] = []
+    if postgres_service:
+        try:
+            rows = await postgres_service.query_history(
+                pair=normalized_pair,
+                start=bucket_time,
+                end=bucket_end_time,
+                limit=10000,
+                descending=False,
+            )
+            bucket_prices = [float(row.price) for row in rows]
+        except Exception as e:
+            logger.debug("Failed to load stream OHLC bucket for %s: %s", normalized_pair, e)
+
+    if not bucket_prices and latest_price is None:
+        return None
+
+    if bucket_prices:
+        open_price = bucket_prices[0]
+        high_price = max(bucket_prices)
+        low_price = min(bucket_prices)
+        close_price = latest_price if latest_price is not None else bucket_prices[-1]
+        prices_for_range = bucket_prices + ([close_price] if latest_price is not None else [])
+        high_price = max(prices_for_range)
+        low_price = min(prices_for_range)
+        volume = len(bucket_prices)
+    else:
+        open_price = high_price = low_price = close_price = latest_price
+        volume = 1
+
+    return {
+        "timestamp": bucket_time.isoformat(),
+        "open": open_price,
+        "high": high_price,
+        "low": low_price,
+        "close": close_price,
+        "volume": volume,
+        "is_forming": True,
+        "interval": interval,
+        "progress_percent": round(progress_percent, 2),
+        "time_remaining_seconds": round(interval_seconds - time_in_bucket, 2),
+    }
+
+
+async def _attach_stream_metadata(
+    data: Dict[str, Any],
+    interval: str = "1m",
+    pair: Optional[str] = None,
+    include_alerts: bool = True,
+) -> Dict[str, Any]:
+    """Attach WebSocket stream metadata while keeping the default broadcast payload."""
+    payload = _attach_alerts(data)
+
+    if not include_alerts:
+        payload.pop("alerts", None)
+
+    if pair:
+        normalized_pair = _normalize_pair_symbol(pair)
+        filtered_pairs: Dict[str, List[Dict[str, Any]]] = {}
+        for source, items in payload.get("pairs", {}).items():
+            matched_items: List[Dict[str, Any]] = []
+            for item in items:
+                if _normalize_pair_symbol(item.get("pair")) != normalized_pair:
+                    continue
+
+                enriched_item = dict(item)
+                latest_price = None
+                if enriched_item.get("price") is not None:
+                    try:
+                        latest_price = float(str(enriched_item["price"]).replace(",", ""))
+                    except (ValueError, TypeError):
+                        latest_price = None
+
+                ohlc = None
+                try:
+                    ohlc = await _build_stream_ohlc_for_pair(pair, latest_price, interval)
+                except Exception as e:
+                    logger.debug("Failed to build stream OHLC for %s: %s", pair, e)
+
+                if ohlc:
+                    enriched_item.update(ohlc)
+
+                matched_items.append(enriched_item)
+
+            filtered_pairs[source] = matched_items
+
+        payload["pairs"] = filtered_pairs
+
+    payload["stream"] = {
+        "interval": interval,
+        "pair": pair,
+        "stream_key": f"{pair or 'all'}:{interval}",
+    }
+    return payload
 
 
 async def _watch_ws_disconnect(ws: WebSocket, stop_event: asyncio.Event) -> None:
