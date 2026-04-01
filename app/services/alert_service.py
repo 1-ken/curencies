@@ -184,10 +184,10 @@ class AlertManager:
     def _sort_alerts_by_recency(self, alerts: List[Alert]) -> List[Alert]:
         """Sort alerts by created_at (desc) and id (desc) for stable recency ordering."""
         def sort_key(alert: Alert) -> tuple:
-            try:
-                created_at = datetime.fromisoformat(alert.created_at)
-            except (TypeError, ValueError):
-                created_at = datetime.min
+            # Use _parse_iso_utc to ensure all datetimes are UTC-aware for comparison
+            created_at = self._parse_iso_utc(alert.created_at)
+            if created_at is None:
+                created_at = datetime.min.replace(tzinfo=timezone.utc)
             return (created_at, alert.id)
 
         return sorted(alerts, key=sort_key, reverse=True)
