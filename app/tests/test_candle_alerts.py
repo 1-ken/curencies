@@ -237,6 +237,115 @@ class TestCandleAlertEvaluation:
         triggered2 = manager.check_candle_alerts(candle_data)
         assert len(triggered2) == 0
 
+    def test_candle_alert_does_not_use_pre_creation_closed_candle(self, tmp_path):
+        """A newly-created alert must ignore candles that closed before creation time."""
+        alert_file = tmp_path / "alerts.json"
+        manager = AlertManager(str(alert_file))
+
+        alert = manager.create_candle_alert(
+            pair="EURUSD",
+            interval="1h",
+            direction="below",
+            threshold=1.1627,
+            email="test@example.com",
+            channel="email",
+        )
+
+        created_at = datetime.fromisoformat(alert.created_at)
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+
+        # This candle closes 1 second BEFORE alert creation.
+        stale_candle_start = created_at - timedelta(hours=1, seconds=1)
+        stale_candle_data = [
+            {
+                "pair": "EURUSD",
+                "interval": "1h",
+                "timestamp": stale_candle_start,
+                "open": 1.1700,
+                "high": 1.1710,
+                "low": 1.1600,
+                "close": 1.1600,
+                "volume": 100,
+            }
+        ]
+
+        triggered = manager.check_candle_alerts(stale_candle_data)
+        assert len(triggered) == 0
+
+    def test_candle_alert_strict_close_boundary_excludes_equal_timestamp(self, tmp_path):
+        """If candle close time equals creation time, it should NOT be eligible."""
+        alert_file = tmp_path / "alerts.json"
+        manager = AlertManager(str(alert_file))
+
+        alert = manager.create_candle_alert(
+            pair="EURUSD",
+            interval="1h",
+            direction="below",
+            threshold=1.1627,
+            email="test@example.com",
+            channel="email",
+        )
+
+        created_at = datetime.fromisoformat(alert.created_at)
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+
+        # Candle close time == created_at (start + 1h == created_at).
+        boundary_candle_start = created_at - timedelta(hours=1)
+        boundary_candle_data = [
+            {
+                "pair": "EURUSD",
+                "interval": "1h",
+                "timestamp": boundary_candle_start,
+                "open": 1.1700,
+                "high": 1.1710,
+                "low": 1.1600,
+                "close": 1.1600,
+                "volume": 100,
+            }
+        ]
+
+        triggered = manager.check_candle_alerts(boundary_candle_data)
+        assert len(triggered) == 0
+
+    def test_candle_alert_triggers_for_first_post_creation_close(self, tmp_path):
+        """A candle that closes after creation time should be eligible to trigger."""
+        alert_file = tmp_path / "alerts.json"
+        manager = AlertManager(str(alert_file))
+
+        alert = manager.create_candle_alert(
+            pair="EURUSD",
+            interval="1h",
+            direction="below",
+            threshold=1.1627,
+            email="test@example.com",
+            channel="email",
+        )
+
+        created_at = datetime.fromisoformat(alert.created_at)
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+
+        # Candle close time is 1 second AFTER creation.
+        eligible_candle_start = created_at - timedelta(hours=1) + timedelta(seconds=1)
+        eligible_candle_data = [
+            {
+                "pair": "EURUSD",
+                "interval": "1h",
+                "timestamp": eligible_candle_start,
+                "open": 1.1700,
+                "high": 1.1710,
+                "low": 1.1600,
+                "close": 1.1600,
+                "volume": 100,
+            }
+        ]
+
+        triggered = manager.check_candle_alerts(eligible_candle_data)
+        assert len(triggered) == 1
+        assert triggered[0]["alert"]["id"] == alert.id
+
     def test_candle_alert_at_exact_threshold(self, tmp_path):
         """Test that alert triggers when close equals threshold exactly."""
         alert_file = tmp_path / "alerts.json"

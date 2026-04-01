@@ -4,7 +4,7 @@ Alert management system for price notifications.
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, asdict
 import uuid
@@ -81,6 +81,35 @@ class AlertManager:
                 indent=2,
             )
 
+    @staticmethod
+    def _utc_now_iso() -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    @staticmethod
+    def _parse_iso_utc(value: Optional[str]) -> Optional[datetime]:
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value))
+        except (TypeError, ValueError):
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    @staticmethod
+    def _interval_seconds(interval: Optional[str]) -> Optional[int]:
+        interval_map = {
+            "1m": 60,
+            "5m": 300,
+            "15m": 900,
+            "30m": 1800,
+            "1h": 3600,
+            "4h": 14400,
+            "1d": 86400,
+        }
+        return interval_map.get(interval)
+
     def create_alert(
         self,
         pair: str,
@@ -104,7 +133,7 @@ class AlertManager:
             phone=phone,
             custom_message=custom_message,
             status="active",
-            created_at=datetime.now().isoformat(),
+            created_at=self._utc_now_iso(),
         )
         self.alerts[alert_id] = alert
         self._save_alerts()
@@ -136,7 +165,7 @@ class AlertManager:
             phone=phone,
             custom_message=custom_message,
             status="active",
-            created_at=datetime.now().isoformat(),
+            created_at=self._utc_now_iso(),
             last_evaluated_candle_time=None,
         )
         self.alerts[alert_id] = alert
@@ -215,7 +244,7 @@ class AlertManager:
         alert = self.get_alert(alert_id)
         if alert:
             alert.status = "triggered"
-            alert.triggered_at = datetime.now().isoformat()
+            alert.triggered_at = self._utc_now_iso()
             alert.last_checked_price = current_price
             self._save_alerts()
             logger.info(f"Triggered alert {alert_id} at price {current_price}")
@@ -308,8 +337,31 @@ class AlertManager:
                 continue
             
             candle = candle_lookup[key]
-            close_price = candle.get("close", 0.0)
+            try:
+                close_price = float(candle.get("close", 0.0))
+            except (TypeError, ValueError):
+                logger.debug("Invalid candle close value for %s %s", alert.pair, alert.interval)
+                continue
             candle_time = candle.get("timestamp")
+
+            candle_start = None
+            if isinstance(candle_time, datetime):
+                candle_start = candle_time if candle_time.tzinfo else candle_time.replace(tzinfo=timezone.utc)
+                candle_start = candle_start.astimezone(timezone.utc)
+            else:
+                candle_start = self._parse_iso_utc(str(candle_time))
+
+            interval_seconds = self._interval_seconds(alert.interval)
+            alert_created_at = self._parse_iso_utc(alert.created_at)
+
+            # If timestamps are parseable, only evaluate candles that closed strictly after alert creation.
+            if candle_start and interval_seconds and alert_created_at:
+                candle_close_time = candle_start + timedelta(seconds=interval_seconds)
+                if candle_close_time <= alert_created_at:
+                    # Mark stale pre-creation candle as evaluated to avoid repeated checks.
+                    alert.last_evaluated_candle_time = str(candle_time)
+                    self._save_alerts()
+                    continue
             
             # Skip if we already evaluated this exact candle for this alert
             if alert.last_evaluated_candle_time == str(candle_time):
@@ -328,7 +380,7 @@ class AlertManager:
                 )
                 # Mark as triggered and save evaluation timestamp
                 alert.status = "triggered"
-                alert.triggered_at = datetime.now().isoformat()
+                alert.triggered_at = self._utc_now_iso()
                 alert.last_checked_price = close_price
                 alert.last_evaluated_candle_time = str(candle_time)
                 self._save_alerts()
