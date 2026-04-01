@@ -1095,6 +1095,174 @@ async def historical_stream_metrics(
     return JSONResponse({"count": len(items), "items": items})
 
 
+@router.get("/historical/ohlc-with-forming")
+async def historical_ohlc_with_forming(
+    pair: str,
+    interval: str = "5m",
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    limit: int = 1000,
+):
+    """Query OHLC candlestick data including the current forming candle.
+    
+    Returns both closed candles from historical data and the current forming candle 
+    based on real-time price data.
+    
+    Args:
+        pair: Currency pair (e.g., EURUSD, GBPUSD)
+        interval: Time interval - 1m, 5m, 15m, 30m, 1h, 4h, 1d (default: 5m)
+        start: Start datetime (ISO 8601 format, optional)
+        end: End datetime (ISO 8601 format, optional)
+        limit: Max closed candles to return (1-5000, default: 1000)
+        
+    Returns:
+        JSON with pair, interval, closed candles, and current forming candle
+    """
+    if not postgres_service:
+        return JSONResponse({"error": "Historical storage not available"}, status_code=503)
+
+    # Validate interval
+    valid_intervals = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
+    if interval not in valid_intervals:
+        return JSONResponse(
+            {"error": f"Invalid interval. Must be one of: {', '.join(valid_intervals)}"},
+            status_code=400
+        )
+
+    # Map interval to seconds for bucketing
+    interval_map = {
+        "1m": 60,
+        "5m": 300,
+        "15m": 900,
+        "30m": 1800,
+        "1h": 3600,
+        "4h": 14400,
+        "1d": 86400,
+    }
+    interval_seconds = interval_map[interval]
+
+    start_dt = _parse_query_datetime(start)
+    end_dt = _parse_query_datetime(end)
+    limit = max(1, min(limit, 5000))
+
+    try:
+        # Get historical closed candles
+        candles = await postgres_service.query_ohlc(
+            pair=pair.upper().replace("/", ""),
+            interval=interval,
+            start=start_dt,
+            end=end_dt,
+            limit=limit,
+        )
+        
+        # Format historical candles
+        formatted_candles = [
+            {
+                "timestamp": candle["timestamp"].isoformat(),
+                "open": float(candle["open"]),
+                "high": float(candle["high"]),
+                "low": float(candle["low"]),
+                "close": float(candle["close"]),
+                "volume": candle["volume"],
+                "is_forming": False,
+            }
+            for candle in candles
+        ]
+
+        # Calculate current forming candle from database prices in current bucket
+        forming_candle = None
+        normalized_pair = pair.upper().replace("/", "")
+        
+        try:
+            current_time = datetime.now(timezone.utc)
+            
+            # Calculate the bucket start time for current forming candle
+            epoch_seconds = current_time.timestamp()
+            bucket_seconds = int(epoch_seconds // interval_seconds) * interval_seconds
+            bucket_time = datetime.fromtimestamp(bucket_seconds, tz=timezone.utc)
+            bucket_end_time = bucket_time + timedelta(seconds=interval_seconds)
+            
+            # Time elapsed in current bucket (0 to interval_seconds)
+            time_in_bucket = epoch_seconds - bucket_seconds
+            progress_percent = (time_in_bucket / interval_seconds) * 100
+            
+            # Get current price from latest snapshot
+            current_price = None
+            if latest_data.get("pairs"):
+                for p in latest_data.get("pairs", []):
+                    if p.get("pair", "").replace("/", "").upper() == normalized_pair:
+                        if p.get("price"):
+                            try:
+                                current_price = float(str(p["price"]).replace(",", ""))
+                            except (ValueError, TypeError):
+                                pass
+                        break
+            
+            # Query all prices in the current bucket from database
+            bucket_prices = await postgres_service.query_history(
+                pair=normalized_pair,
+                start=bucket_time,
+                end=bucket_end_time,
+                limit=10000,
+                descending=False,  # ASC order to get open first
+            )
+            
+            if bucket_prices:
+                # Calculate OHLC from all prices in bucket
+                prices = [float(p.price) for p in bucket_prices]
+                # Use current price for close if available, otherwise use last bucket price
+                close_price = current_price if current_price is not None else prices[-1]
+                
+                forming_candle = {
+                    "timestamp": bucket_time.isoformat(),
+                    "open": prices[0],
+                    "high": max(prices + [close_price]) if current_price is not None else max(prices),
+                    "low": min(prices + [close_price]) if current_price is not None else min(prices),
+                    "close": close_price,
+                    "volume": len(prices),
+                    "is_forming": True,
+                    "progress_percent": round(progress_percent, 2),
+                    "time_remaining_seconds": round(interval_seconds - time_in_bucket, 2),
+                }
+            elif current_price is not None:
+                # Fallback to latest snapshot if no bucket data
+                forming_candle = {
+                    "timestamp": bucket_time.isoformat(),
+                    "open": current_price,
+                    "high": current_price,
+                    "low": current_price,
+                    "close": current_price,
+                    "volume": 1,
+                    "is_forming": True,
+                    "progress_percent": round(progress_percent, 2),
+                    "time_remaining_seconds": round(interval_seconds - time_in_bucket, 2),
+                }
+        except (ValueError, TypeError, AttributeError) as e:
+            logger.warning(f"Error calculating forming candle for {normalized_pair}: {e}")
+            pass
+
+        # Combine closed candles and forming candle
+        all_candles = formatted_candles.copy()
+        if forming_candle:
+            all_candles.append(forming_candle)
+
+        return JSONResponse({
+            "pair": pair,
+            "interval": interval,
+            "start": start_dt.isoformat() if start_dt else None,
+            "end": end_dt.isoformat() if end_dt else None,
+            "closed_candles_count": len(formatted_candles),
+            "has_forming_candle": forming_candle is not None,
+            "last_update": latest_data.get("ts", datetime.now(timezone.utc).isoformat()),
+            "candles": all_candles,
+        })
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    except Exception as e:
+        logger.error(f"Error querying OHLC data with forming candle: {e}")
+        return JSONResponse({"error": "Failed to query OHLC data"}, status_code=500)
+
+
 def _parse_query_datetime(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None

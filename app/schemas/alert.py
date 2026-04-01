@@ -15,6 +15,17 @@ class CreateAlertRequest(BaseModel):
     alert_type: str = "price"  # "price" for legacy live-price alerts
 
 
+class UpdateAlertRequest(BaseModel):
+    """Request model for updating a price alert."""
+    target_price: Optional[float] = None
+    condition: Optional[str] = None  # "above", "below", or "equal"
+    channel: Optional[str] = None  # "email", "sms", or "call"
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    custom_message: Optional[str] = None
+    status: Optional[str] = None  # "active", "triggered", "disabled"
+
+
 class CreateCandleAlertRequest(BaseModel):
     """Request model for creating a candle-close threshold alert."""
     pair: str
@@ -41,6 +52,17 @@ class CreateCandleAlertRequest(BaseModel):
             }
         }
     }
+
+
+class UpdateCandleAlertRequest(BaseModel):
+    """Request model for updating a candle-close threshold alert."""
+    direction: Optional[str] = None  # "above" or "below"
+    threshold: Optional[float] = None  # Price level to compare candle close against
+    channel: Optional[str] = None  # "email", "sms", or "call"
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    custom_message: Optional[str] = None
+    status: Optional[str] = None  # "active", "triggered", "disabled"
 
 
 class AlertResponse(BaseModel):

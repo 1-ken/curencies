@@ -180,6 +180,36 @@ class AlertManager:
             return True
         return False
 
+    def update_alert(self, alert_id: str, updates: Dict[str, Any]) -> Optional[Alert]:
+        """Update an existing alert with new values.
+        
+        Args:
+            alert_id: ID of alert to update
+            updates: Dict of fields to update (target_price, condition, channel, email, phone, custom_message, status)
+            
+        Returns:
+            Updated Alert object or None if not found
+        """
+        alert = self.get_alert(alert_id)
+        if not alert:
+            return None
+        
+        # For price alerts
+        if alert.alert_type == "price":
+            for key in ["target_price", "condition", "channel", "email", "phone", "custom_message", "status"]:
+                if key in updates and updates[key] is not None:
+                    setattr(alert, key, updates[key])
+        
+        # For candle-close alerts
+        elif alert.alert_type == "candle_close":
+            for key in ["direction", "threshold", "channel", "email", "phone", "custom_message", "status"]:
+                if key in updates and updates[key] is not None:
+                    setattr(alert, key, updates[key])
+        
+        self._save_alerts()
+        logger.info(f"Updated alert {alert_id}")
+        return alert
+
     def trigger_alert(self, alert_id: str, current_price: float) -> bool:
         """Mark an alert as triggered."""
         alert = self.get_alert(alert_id)
@@ -306,9 +336,5 @@ class AlertManager:
                     "alert": alert.to_dict(),
                     "current_price": close_price,
                 })
-            else:
-                # Update last evaluated candle time even if not triggered (for next iteration)
-                alert.last_evaluated_candle_time = str(candle_time)
-                self._save_alerts()
         
         return triggered

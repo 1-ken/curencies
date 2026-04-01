@@ -1,9 +1,9 @@
 {
   "info": {
     "name": "Finance Observer API",
-    "description": "Real-time forex currency pair price monitoring with price alerts",
+    "description": "Real-time forex currency pair price monitoring with price alerts and candlestick data",
     "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
-    "version": "1.0.0"
+    "version": "2.0.0"
   },
   "variable": [
     {
@@ -197,6 +197,54 @@
               ]
             },
             "description": "Get OHLC candlestick data aggregated by time interval (5m, 1h, 1d, etc.). Pair supports both slash and non-slash formats (e.g., EURUSD or EUR/USD)."
+          },
+          "response": []
+        },
+        {
+          "name": "Query OHLC with Forming Candle",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/historical/ohlc-with-forming?pair=EURUSD&interval=4h&limit=50",
+              "host": ["{{base_url}}"],
+              "path": ["historical", "ohlc-with-forming"],
+              "query": [
+                {
+                  "key": "pair",
+                  "value": "EURUSD",
+                  "description": "Required: currency pair (supports EURUSD or EUR/USD format)"
+                },
+                {
+                  "key": "interval",
+                  "value": "4h",
+                  "description": "Time interval: 1m, 5m, 15m, 30m, 1h, 4h, 1d (default: 5m)"
+                },
+                {
+                  "key": "start",
+                  "value": "2026-02-18T00:00:00Z",
+                  "disabled": true,
+                  "description": "Optional: start date-time (ISO 8601)"
+                },
+                {
+                  "key": "end",
+                  "value": "2026-02-18T23:59:59Z",
+                  "disabled": true,
+                  "description": "Optional: end date-time (ISO 8601)"
+                },
+                {
+                  "key": "limit",
+                  "value": "50",
+                  "description": "Max closed candles (1-5000, default 1000)"
+                }
+              ]
+            },
+            "description": "Get historical OHLC candles PLUS the current forming candle in real-time. Forming candle includes:\n- is_forming: true flag\n- progress_percent: How much of the interval has elapsed (0-100%)\n- time_remaining_seconds: Seconds until candle closes\n\nPerfect for rendering live charts with forming price action."
           },
           "response": []
         },
@@ -482,6 +530,60 @@
             "description": "Delete an alert by ID (works for all alert types)"
           },
           "response": []
+        },
+        {
+          "name": "Update Price Alert",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"target_price\": 1.0900,\n  \"condition\": \"above\",\n  \"channel\": \"sms\",\n  \"phone\": \"+1234567890\",\n  \"custom_message\": \"Updated: Euro above 1.0900\",\n  \"status\": \"active\"\n}"
+            },
+            "url": {
+              "raw": "{{api_base}}/alerts/{{alert_id}}",
+              "host": ["{{base_url}}", "api", "v1"],
+              "path": ["alerts", "{{alert_id}}"]
+            },
+            "description": "Update a price alert. Supports partial updates - only include fields you want to change. Fields: target_price, condition (above/below/equal), channel, email, phone, custom_message, status (active/triggered/disabled)"
+          },
+          "response": []
+        },
+        {
+          "name": "Update Candle-Close Alert",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"direction\": \"below\",\n  \"threshold\": 1.0800,\n  \"channel\": \"email\",\n  \"email\": \"newemail@example.com\",\n  \"custom_message\": \"4h candle closed below 1.0800\",\n  \"status\": \"active\"\n}"
+            },
+            "url": {
+              "raw": "{{api_base}}/alerts/{{alert_id}}",
+              "host": ["{{base_url}}", "api", "v1"],
+              "path": ["alerts", "{{alert_id}}"]
+            },
+            "description": "Update a candle-close alert. Supports partial updates - only include fields you want to change. Fields: direction (above/below), threshold, channel, email, phone, custom_message, status (active/triggered/disabled)"
+          },
+          "response": []
         }
       ]
     },
@@ -740,6 +842,114 @@
           "response": []
         },
         {
+          "name": "Test - Update Price Alert (Change Threshold)",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"target_price\": 1.0950,\n  \"condition\": \"above\"\n}"
+            },
+            "url": {
+              "raw": "{{api_base}}/alerts/{{alert_id}}",
+              "host": ["{{base_url}}", "api", "v1"],
+              "path": ["alerts", "{{alert_id}}"]
+            },
+            "description": "Update an existing price alert - change the target price threshold. Demonstrates partial update (only target_price and condition)."
+          },
+          "response": []
+        },
+        {
+          "name": "Test - Update Alert Channel (Email to SMS)",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"channel\": \"sms\",\n  \"phone\": \"+1234567890\",\n  \"email\": \"\"\n}"
+            },
+            "url": {
+              "raw": "{{api_base}}/alerts/{{alert_id}}",
+              "host": ["{{base_url}}", "api", "v1"],
+              "path": ["alerts", "{{alert_id}}"]
+            },
+            "description": "Update an alert to change notification channel from email to SMS. Works for both price and candle-close alerts."
+          },
+          "response": []
+        },
+        {
+          "name": "Test - Update Candle Alert Threshold",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"threshold\": 1.0875,\n  \"direction\": \"below\",\n  \"custom_message\": \"Updated: 4h candle closed below 1.0875\"\n}"
+            },
+            "url": {
+              "raw": "{{api_base}}/alerts/{{alert_id}}",
+              "host": ["{{base_url}}", "api", "v1"],
+              "path": ["alerts", "{{alert_id}}"]
+            },
+            "description": "Update a candle-close alert - change threshold, direction, and custom message. Demonstrates multi-field partial update."
+          },
+          "response": []
+        },
+        {
+          "name": "Test - Disable Alert (Change Status)",
+          "request": {
+            "method": "PUT",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status\": \"disabled\"\n}"
+            },
+            "url": {
+              "raw": "{{api_base}}/alerts/{{alert_id}}",
+              "host": ["{{base_url}}", "api", "v1"],
+              "path": ["alerts", "{{alert_id}}"]
+            },
+            "description": "Update alert status from 'active' to 'disabled'. This pauses alert checking. Can be re-enabled by setting status back to 'active'."
+          },
+          "response": []
+        },
+        {
           "name": "Test - Different Intervals (1h, 4h, 1d)",
           "request": {
             "method": "GET",
@@ -866,6 +1076,100 @@
                   "});",
                   "pm.test('At least one historical row returned', function () {",
                   "  pm.expect(json.count).to.be.above(0);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "response": []
+        },
+        {
+          "name": "Chart Rendering - OHLC with Forming Candle (4h)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/historical/ohlc-with-forming?pair=EURUSD&interval=4h&limit=50",
+              "host": ["{{base_url}}"],
+              "path": ["historical", "ohlc-with-forming"],
+              "query": [
+                {
+                  "key": "pair",
+                  "value": "EURUSD"
+                },
+                {
+                  "key": "interval",
+                  "value": "4h"
+                },
+                {
+                  "key": "limit",
+                  "value": "50"
+                }
+              ]
+            },
+            "description": "Get historical OHLC candles PLUS the current forming candle for real-time chart rendering.\n\nResponse includes:\n- closed_candles: Historical candles from PostgreSQL (is_forming: false)\n- forming_candle: Current candle with:\n  - is_forming: true\n  - progress_percent: How much of interval has elapsed (0-100%)\n  - time_remaining_seconds: Seconds until candle closes\n\nPerfect for rendering live candlestick charts with real-time formations."
+          },
+          "response": []
+        },
+        {
+          "name": "Chart Rendering - Different Intervals (1h, 15m, 1m)",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Accept",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/historical/ohlc-with-forming?pair=GBPUSD&interval=1h&limit=100",
+              "host": ["{{base_url}}"],
+              "path": ["historical", "ohlc-with-forming"],
+              "query": [
+                {
+                  "key": "pair",
+                  "value": "GBPUSD"
+                },
+                {
+                  "key": "interval",
+                  "value": "1h"
+                },
+                {
+                  "key": "limit",
+                  "value": "100"
+                }
+              ]
+            },
+            "description": "Test the ohlc-with-forming endpoint with different intervals:\n- 1m: Fastest updates, most granular\n- 5m, 15m, 30m: Mid-frequency\n- 1h, 4h: Slower updates, broader view\n- 1d: Daily candles\n\nAll support real-time forming candle tracking."
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('Status is 200', function () {",
+                  "  pm.response.to.have.status(200);",
+                  "});",
+                  "const json = pm.response.json();",
+                  "pm.test('Response has required fields', function () {",
+                  "  pm.expect(json).to.have.property('candles');",
+                  "  pm.expect(json).to.have.property('closed_candles_count');",
+                  "  pm.expect(json).to.have.property('has_forming_candle');",
+                  "});",
+                  "pm.test('Has at least one forming candle', function () {",
+                  "  pm.expect(json.has_forming_candle).to.be.true;",
+                  "});",
+                  "const formingCandle = json.candles.find(c => c.is_forming === true);",
+                  "pm.test('Forming candle has progress tracking', function () {",
+                  "  pm.expect(formingCandle).to.have.property('progress_percent');",
+                  "  pm.expect(formingCandle).to.have.property('time_remaining_seconds');",
+                  "  pm.expect(formingCandle.progress_percent).to.be.within(0, 100);",
                   "});"
                 ]
               }

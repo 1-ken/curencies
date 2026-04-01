@@ -4,7 +4,13 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 from typing import Union
 
-from app.schemas.alert import CreateAlertRequest, CreateCandleAlertRequest, AlertResponse
+from app.schemas.alert import (
+    CreateAlertRequest, 
+    UpdateAlertRequest,
+    CreateCandleAlertRequest,
+    UpdateCandleAlertRequest,
+    AlertResponse
+)
 from app.services.alert_service import AlertManager
 
 logger = logging.getLogger(__name__)
@@ -116,3 +122,67 @@ async def delete_alert(alert_id: str):
     if alert_manager.delete_alert(alert_id):
         return {"success": True, "message": "Alert deleted"}
     raise HTTPException(status_code=404, detail="Alert not found")
+
+
+@router.put("/{alert_id}", response_model=dict)
+async def update_alert(alert_id: str, request: Union[UpdateAlertRequest, UpdateCandleAlertRequest]):
+    """Update an existing alert (price-based or candle-close).
+    
+    Supports partial updates - only include fields you want to change.
+    """
+    alert = alert_manager.get_alert(alert_id)
+    if not alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    
+    # Prepare updates dict from request
+    updates = request.model_dump(exclude_unset=True)
+    
+    # Validate updates based on alert type
+    if alert.alert_type == "price":
+        # Price alert validation
+        if "condition" in updates and updates["condition"] not in ["above", "below", "equal"]:
+            raise HTTPException(status_code=400, detail="Condition must be 'above', 'below', or 'equal'")
+        
+        if "channel" in updates and updates["channel"] not in ["email", "sms", "call"]:
+            raise HTTPException(status_code=400, detail="Channel must be 'email', 'sms', or 'call'")
+        
+        if updates.get("channel") == "email" and not updates.get("email"):
+            if not alert.email and not updates.get("email"):
+                raise HTTPException(status_code=400, detail="Email is required for email alerts")
+        if updates.get("channel") == "sms" and not updates.get("phone"):
+            if not alert.phone and not updates.get("phone"):
+                raise HTTPException(status_code=400, detail="Phone is required for SMS alerts")
+        if updates.get("channel") == "call" and not updates.get("phone"):
+            if not alert.phone and not updates.get("phone"):
+                raise HTTPException(status_code=400, detail="Phone is required for call alerts")
+        
+        if "status" in updates and updates["status"] not in ["active", "triggered", "disabled"]:
+            raise HTTPException(status_code=400, detail="Status must be 'active', 'triggered', or 'disabled'")
+    
+    elif alert.alert_type == "candle_close":
+        # Candle alert validation
+        if "direction" in updates and updates["direction"] not in ["above", "below"]:
+            raise HTTPException(status_code=400, detail="Direction must be 'above' or 'below'")
+        
+        if "channel" in updates and updates["channel"] not in ["email", "sms", "call"]:
+            raise HTTPException(status_code=400, detail="Channel must be 'email', 'sms', or 'call'")
+        
+        if updates.get("channel") == "email" and not updates.get("email"):
+            if not alert.email and not updates.get("email"):
+                raise HTTPException(status_code=400, detail="Email is required for email alerts")
+        if updates.get("channel") == "sms" and not updates.get("phone"):
+            if not alert.phone and not updates.get("phone"):
+                raise HTTPException(status_code=400, detail="Phone is required for SMS alerts")
+        if updates.get("channel") == "call" and not updates.get("phone"):
+            if not alert.phone and not updates.get("phone"):
+                raise HTTPException(status_code=400, detail="Phone is required for call alerts")
+        
+        if "status" in updates and updates["status"] not in ["active", "triggered", "disabled"]:
+            raise HTTPException(status_code=400, detail="Status must be 'active', 'triggered', or 'disabled'")
+    
+    # Perform update
+    updated_alert = alert_manager.update_alert(alert_id, updates)
+    if not updated_alert:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    
+    return {"success": True, "alert": updated_alert.to_dict()}

@@ -338,6 +338,7 @@ class PostgresService:
         pair_2 = pair_variants[2] if len(pair_variants) > 2 else pair_0
 
         # Query: Get the candle that is fully closed (before the current bucket)
+        # Compare bucket numbers directly to avoid edge cases with timestamp reconstruction
         query = text("""
             SELECT
                 TO_TIMESTAMP((EXTRACT(EPOCH FROM observed_at)::bigint / :interval_seconds) * :interval_seconds) AS bucket,
@@ -348,7 +349,7 @@ class PostgresService:
                 COUNT(*) AS volume
             FROM historical_prices
             WHERE (pair = :pair_0 OR pair = :pair_1 OR pair = :pair_2)
-                AND observed_at < TO_TIMESTAMP((EXTRACT(EPOCH FROM NOW())::bigint / :interval_seconds) * :interval_seconds)
+                AND (EXTRACT(EPOCH FROM observed_at)::bigint / :interval_seconds) < (EXTRACT(EPOCH FROM NOW())::bigint / :interval_seconds)
             GROUP BY bucket
             ORDER BY bucket DESC
             LIMIT 1
