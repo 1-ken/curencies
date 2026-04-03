@@ -28,6 +28,7 @@ class Alert:
     custom_message: str = ""
     triggered_at: Optional[str] = None
     last_checked_price: Optional[float] = None
+    close_price: Optional[float] = None
     
     # Price alert fields (for alert_type="price")
     target_price: Optional[float] = None
@@ -63,10 +64,12 @@ class AlertManager:
         try:
             with open(self.file_path, "r") as f:
                 data = json.load(f)
-                self.alerts = {
-                    alert_id: Alert.from_dict(alert_data)
-                    for alert_id, alert_data in data.items()
-                }
+                self.alerts = {}
+                for alert_id, alert_data in data.items():
+                    alert_obj = Alert.from_dict(alert_data)
+                    if alert_obj.alert_type == "candle_close":
+                        alert_obj.interval = self._normalize_interval(alert_obj.interval)
+                    self.alerts[alert_id] = alert_obj
             logger.info(f"Loaded {len(self.alerts)} alerts")
         except FileNotFoundError:
             logger.info("No existing alerts file, starting fresh")
@@ -110,6 +113,12 @@ class AlertManager:
         }
         return interval_map.get(interval)
 
+    @staticmethod
+    def _normalize_interval(interval: Optional[str]) -> Optional[str]:
+        if interval is None:
+            return None
+        return str(interval).strip().lower()
+
     def create_alert(
         self,
         pair: str,
@@ -152,12 +161,16 @@ class AlertManager:
         custom_message: str = "",
     ) -> Alert:
         """Create a new candle-close threshold alert (alert_type='candle_close')."""
+        normalized_interval = self._normalize_interval(interval)
+        if self._interval_seconds(normalized_interval) is None:
+            raise ValueError("Invalid interval. Must be one of: 1m, 5m, 15m, 30m, 1h, 4h, 1d")
+
         alert_id = str(uuid.uuid4())
         alert = Alert(
             id=alert_id,
             pair=pair,
             alert_type="candle_close",
-            interval=interval,
+            interval=normalized_interval,
             direction=direction,
             threshold=threshold,
             email=email,
@@ -170,7 +183,7 @@ class AlertManager:
         )
         self.alerts[alert_id] = alert
         self._save_alerts()
-        logger.info(f"Created candle-close alert {alert_id} for {pair} {interval} {direction} {threshold}")
+        logger.info(f"Created candle-close alert {alert_id} for {pair} {normalized_interval} {direction} {threshold}")
         return alert
 
     def get_alert(self, alert_id: str) -> Optional[Alert]:
@@ -231,6 +244,11 @@ class AlertManager:
         
         # For candle-close alerts
         elif alert.alert_type == "candle_close":
+            if "interval" in updates and updates["interval"] is not None:
+                normalized_interval = self._normalize_interval(updates["interval"])
+                if self._interval_seconds(normalized_interval) is None:
+                    raise ValueError("Invalid interval. Must be one of: 1m, 5m, 15m, 30m, 1h, 4h, 1d")
+                updates["interval"] = normalized_interval
             for key in ["direction", "threshold", "channel", "email", "phone", "custom_message", "status"]:
                 if key in updates and updates[key] is not None:
                     setattr(alert, key, updates[key])
@@ -246,6 +264,7 @@ class AlertManager:
             alert.status = "triggered"
             alert.triggered_at = self._utc_now_iso()
             alert.last_checked_price = current_price
+            alert.close_price = current_price
             self._save_alerts()
             logger.info(f"Triggered alert {alert_id} at price {current_price}")
             return True
@@ -321,7 +340,8 @@ class AlertManager:
         # Build lookup: (pair, interval) -> latest candle
         candle_lookup: Dict[tuple, Dict[str, Any]] = {}
         for candle in ohlc_data:
-            key = (self._normalize_pair(candle.get("pair", "")), candle.get("interval", ""))
+            normalized_interval = self._normalize_interval(candle.get("interval", ""))
+            key = (self._normalize_pair(candle.get("pair", "")), normalized_interval)
             # Keep the most recent (first in returned list if query sorts DESC then ASC)
             if key not in candle_lookup:
                 candle_lookup[key] = candle
@@ -331,7 +351,8 @@ class AlertManager:
             if alert.alert_type != "candle_close":
                 continue
             
-            key = (self._normalize_pair(alert.pair), alert.interval)
+            normalized_alert_interval = self._normalize_interval(alert.interval)
+            key = (self._normalize_pair(alert.pair), normalized_alert_interval)
             if key not in candle_lookup:
                 logger.debug(f"No candle data for {alert.pair} {alert.interval}")
                 continue
@@ -382,11 +403,19 @@ class AlertManager:
                 alert.status = "triggered"
                 alert.triggered_at = self._utc_now_iso()
                 alert.last_checked_price = close_price
+                alert.close_price = close_price
                 alert.last_evaluated_candle_time = str(candle_time)
                 self._save_alerts()
                 triggered.append({
                     "alert": alert.to_dict(),
                     "current_price": close_price,
+                    "close_price": close_price,
+                    "candle": {
+                        "pair": candle.get("pair"),
+                        "interval": normalized_alert_interval,
+                        "expected_open": candle_start.isoformat() if candle_start else str(candle_time),
+                        "expected_close": (candle_start + timedelta(seconds=interval_seconds)).isoformat() if candle_start and interval_seconds else None,
+                    },
                 })
         
         return triggered

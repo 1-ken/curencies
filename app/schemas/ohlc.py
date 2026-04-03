@@ -13,6 +13,8 @@ class OHLCCandle(BaseModel):
     low: float
     close: float
     volume: int  # Number of ticks in this candle
+    expected_open: Optional[datetime] = None
+    expected_close: Optional[datetime] = None
 
 
 class OHLCResponse(BaseModel):

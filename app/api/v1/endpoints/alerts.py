@@ -41,6 +41,7 @@ async def create_alert(request: Union[CreateAlertRequest, CreateCandleAlertReque
     """
     # Try to parse as candle alert first (has 'interval' field)
     if hasattr(request, 'interval') and request.interval:
+        request.interval = request.interval.strip().lower()
         # Candle-close alert
         if request.channel not in ["email", "sms", "call"]:
             raise HTTPException(status_code=400, detail="Channel must be 'email', 'sms', or 'call'")
@@ -58,16 +59,19 @@ async def create_alert(request: Union[CreateAlertRequest, CreateCandleAlertReque
         if request.interval not in valid_intervals:
             raise HTTPException(status_code=400, detail=f"Interval must be one of: {', '.join(valid_intervals)}")
         
-        alert = alert_manager.create_candle_alert(
-            pair=request.pair,
-            interval=request.interval,
-            direction=request.direction,
-            threshold=request.threshold,
-            email=request.email,
-            channel=request.channel,
-            phone=request.phone,
-            custom_message=request.custom_message,
-        )
+        try:
+            alert = alert_manager.create_candle_alert(
+                pair=request.pair,
+                interval=request.interval,
+                direction=request.direction,
+                threshold=request.threshold,
+                email=request.email,
+                channel=request.channel,
+                phone=request.phone,
+                custom_message=request.custom_message,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
         return {"success": True, "alert": alert.to_dict()}
     else:
         # Price-based alert (legacy)

@@ -612,6 +612,8 @@ async def _build_stream_ohlc_for_pair(
         "volume": volume,
         "is_forming": True,
         "interval": interval,
+        "expected_open": bucket_time.isoformat(),
+        "expected_close": bucket_end_time.isoformat(),
         "progress_percent": round(progress_percent, 2),
         "time_remaining_seconds": round(interval_seconds - time_in_bucket, 2),
     }
@@ -882,7 +884,7 @@ async def alert_monitoring_task():
     logger.info(f"Alert monitor subscribed to data stream (total subscribers: {len(data_subscribers)})")
     
     last_candle_check = 0.0
-    candle_check_interval = 30.0  # Check candle alerts every 30 seconds
+    candle_check_interval = 1.0  # Check candle alerts every second for low-latency close triggers
     
     try:
         while True:
@@ -893,51 +895,56 @@ async def alert_monitoring_task():
                     await asyncio.sleep(60)  # Check every 60 seconds when market closed
                     continue
                 
-                # Market is open - wait for data with timeout
-                data = await asyncio.wait_for(data_queue.get(), timeout=5.0)
-                
-                # ===== Check PRICE alerts (from live stream) =====
-                triggered_alerts = await asyncio.to_thread(
-                    alert_manager.check_alerts,
-                    data.get("pairs", []),
-                )
-                if triggered_alerts:
-                    logger.warning("Triggered %s price alert(s)", len(triggered_alerts))
-                    for alert_data in triggered_alerts:
-                        alert = alert_data["alert"]
-                        current_price = alert_data["current_price"]
-                        channel = alert.get("channel", "email")
-                        
-                        if channel == "sms" and sms_service and alert.get("phone"):
-                            await _run_alert_action(
-                                sms_service.send_price_alert,
-                                to_phone=alert["phone"],
-                                pair=alert["pair"],
-                                target_price=alert["target_price"],
-                                current_price=current_price,
-                                condition=alert["condition"],
-                                custom_message=alert.get("custom_message", ""),
-                            )
-                        elif channel == "call" and call_service and alert.get("phone"):
-                            await _run_alert_action(
-                                call_service.send_price_alert,
-                                to_phone=alert["phone"],
-                                pair=alert["pair"],
-                                target_price=alert["target_price"],
-                                current_price=current_price,
-                                condition=alert["condition"],
-                                custom_message=alert.get("custom_message", ""),
-                            )
-                        elif channel == "email" and email_service and alert.get("email"):
-                            await _run_alert_action(
-                                email_service.send_price_alert,
-                                to_email=alert["email"],
-                                pair=alert["pair"],
-                                target_price=alert["target_price"],
-                                current_price=current_price,
-                                condition=alert["condition"],
-                                custom_message=alert.get("custom_message", ""),
-                            )
+                # Market is open - process latest stream item if available, but don't block candle checks
+                data = None
+                try:
+                    data = await asyncio.wait_for(data_queue.get(), timeout=0.2)
+                except asyncio.TimeoutError:
+                    data = None
+
+                if data is not None:
+                    # ===== Check PRICE alerts (from live stream) =====
+                    triggered_alerts = await asyncio.to_thread(
+                        alert_manager.check_alerts,
+                        data.get("pairs", []),
+                    )
+                    if triggered_alerts:
+                        logger.warning("Triggered %s price alert(s)", len(triggered_alerts))
+                        for alert_data in triggered_alerts:
+                            alert = alert_data["alert"]
+                            current_price = alert_data["current_price"]
+                            channel = alert.get("channel", "email")
+                            
+                            if channel == "sms" and sms_service and alert.get("phone"):
+                                await _run_alert_action(
+                                    sms_service.send_price_alert,
+                                    to_phone=alert["phone"],
+                                    pair=alert["pair"],
+                                    target_price=alert["target_price"],
+                                    current_price=current_price,
+                                    condition=alert["condition"],
+                                    custom_message=alert.get("custom_message", ""),
+                                )
+                            elif channel == "call" and call_service and alert.get("phone"):
+                                await _run_alert_action(
+                                    call_service.send_price_alert,
+                                    to_phone=alert["phone"],
+                                    pair=alert["pair"],
+                                    target_price=alert["target_price"],
+                                    current_price=current_price,
+                                    condition=alert["condition"],
+                                    custom_message=alert.get("custom_message", ""),
+                                )
+                            elif channel == "email" and email_service and alert.get("email"):
+                                await _run_alert_action(
+                                    email_service.send_price_alert,
+                                    to_email=alert["email"],
+                                    pair=alert["pair"],
+                                    target_price=alert["target_price"],
+                                    current_price=current_price,
+                                    condition=alert["condition"],
+                                    custom_message=alert.get("custom_message", ""),
+                                )
                 
                 # ===== Check CANDLE-CLOSE alerts (from PostgreSQL, on timer) =====
                 now = time.monotonic()
@@ -967,7 +974,7 @@ async def alert_monitoring_task():
                                 logger.warning("Triggered %s candle alert(s)", len(triggered_candle_alerts))
                                 for alert_data in triggered_candle_alerts:
                                     alert = alert_data["alert"]
-                                    current_price = alert_data["current_price"]
+                                    close_price = alert_data.get("close_price", alert_data.get("current_price"))
                                     channel = alert.get("channel", "email")
                                     
                                     if channel == "sms" and sms_service and alert.get("phone"):
@@ -976,7 +983,7 @@ async def alert_monitoring_task():
                                             to_phone=alert["phone"],
                                             pair=alert["pair"],
                                             target_price=alert["threshold"],
-                                            current_price=current_price,
+                                            current_price=close_price,
                                             condition=alert["direction"],
                                             custom_message=alert.get("custom_message", ""),
                                         )
@@ -986,7 +993,7 @@ async def alert_monitoring_task():
                                             to_phone=alert["phone"],
                                             pair=alert["pair"],
                                             target_price=alert["threshold"],
-                                            current_price=current_price,
+                                            current_price=close_price,
                                             condition=alert["direction"],
                                             custom_message=alert.get("custom_message", ""),
                                         )
@@ -996,17 +1003,13 @@ async def alert_monitoring_task():
                                             to_email=alert["email"],
                                             pair=alert["pair"],
                                             target_price=alert["threshold"],
-                                            current_price=current_price,
+                                            current_price=close_price,
                                             condition=alert["direction"],
                                             custom_message=alert.get("custom_message", ""),
                                         )
                     except Exception as e:
                         logger.error(f"Error checking candle alerts: {e}")
                         
-            except asyncio.TimeoutError:
-                # Queue timeout only when market is open - data stream may be slow
-                logger.debug("Alert monitor: no data received within 5s (market may be busy)")
-                continue
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -1171,6 +1174,8 @@ async def historical_ohlc(
     Returns:
         JSON with pair, interval, count, and array of OHLC candles
     """
+    interval = interval.strip().lower()
+
     if not postgres_service:
         return JSONResponse({"error": "Historical storage not available"}, status_code=503)
 
@@ -1204,6 +1209,8 @@ async def historical_ohlc(
                 "low": candle["low"],
                 "close": candle["close"],
                 "volume": candle["volume"],
+                "expected_open": candle["timestamp"].isoformat(),
+                "expected_close": (candle["timestamp"] + timedelta(seconds=_interval_to_seconds(interval))).isoformat(),
             }
             for candle in candles
         ]
@@ -1287,6 +1294,8 @@ async def historical_ohlc_with_forming(
     Returns:
         JSON with pair, interval, closed candles, and current forming candle
     """
+    interval = interval.strip().lower()
+
     if not postgres_service:
         return JSONResponse({"error": "Historical storage not available"}, status_code=503)
 
@@ -1334,6 +1343,8 @@ async def historical_ohlc_with_forming(
                 "close": float(candle["close"]),
                 "volume": candle["volume"],
                 "is_forming": False,
+                "expected_open": candle["timestamp"].isoformat(),
+                "expected_close": (candle["timestamp"] + timedelta(seconds=interval_seconds)).isoformat(),
             }
             for candle in candles
         ]
@@ -1390,6 +1401,8 @@ async def historical_ohlc_with_forming(
                     "close": close_price,
                     "volume": len(prices),
                     "is_forming": True,
+                    "expected_open": bucket_time.isoformat(),
+                    "expected_close": bucket_end_time.isoformat(),
                     "progress_percent": round(progress_percent, 2),
                     "time_remaining_seconds": round(interval_seconds - time_in_bucket, 2),
                 }
@@ -1403,6 +1416,8 @@ async def historical_ohlc_with_forming(
                     "close": current_price,
                     "volume": 1,
                     "is_forming": True,
+                    "expected_open": bucket_time.isoformat(),
+                    "expected_close": bucket_end_time.isoformat(),
                     "progress_percent": round(progress_percent, 2),
                     "time_remaining_seconds": round(interval_seconds - time_in_bucket, 2),
                 }

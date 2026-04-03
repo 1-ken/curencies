@@ -71,6 +71,22 @@ class TestCandleAlertCreation:
             assert alert.interval == interval
             assert alert.alert_type == "candle_close"
 
+    def test_create_candle_alert_normalizes_interval(self, tmp_path):
+        """Test candle interval normalization (case/whitespace)."""
+        alert_file = tmp_path / "alerts.json"
+        manager = AlertManager(str(alert_file))
+
+        alert = manager.create_candle_alert(
+            pair="EURUSD",
+            interval=" 4H ",
+            direction="above",
+            threshold=1.0850,
+            email="test@example.com",
+            channel="email",
+        )
+
+        assert alert.interval == "4h"
+
     def test_candle_alert_has_required_fields(self, tmp_path):
         """Test that candle alert has all required fields."""
         alert_file = tmp_path / "alerts.json"
@@ -134,6 +150,9 @@ class TestCandleAlertEvaluation:
         assert len(triggered) == 1
         assert triggered[0]["alert"]["id"] == alert.id
         assert triggered[0]["current_price"] == 1.0855
+        assert triggered[0]["close_price"] == 1.0855
+        assert triggered[0]["candle"]["expected_open"] is not None
+        assert triggered[0]["candle"]["expected_close"] is not None
     
     def test_check_candle_alerts_below_triggers(self, tmp_path):
         """Test that candle alert triggers when close <= threshold (below)."""

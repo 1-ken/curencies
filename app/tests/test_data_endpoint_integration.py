@@ -48,6 +48,30 @@ class _MetricRow:
         self.stream_status = stream_status
 
 
+class _OHLCPostgresService:
+    async def query_ohlc(self, pair, interval, start, end, limit):
+        return [
+            {
+                "timestamp": datetime(2026, 4, 3, 12, 0, tzinfo=timezone.utc),
+                "open": 1.1,
+                "high": 1.2,
+                "low": 1.0,
+                "close": 1.15,
+                "volume": 42,
+            }
+        ]
+
+
+class _BucketPriceRow:
+    def __init__(self, price: float):
+        self.price = price
+
+
+class _StreamOHLCPostgresService:
+    async def query_history(self, pair, start, end, limit, descending):
+        return [_BucketPriceRow(1.1), _BucketPriceRow(1.12), _BucketPriceRow(1.11)]
+
+
 class _HistoryPostgresService:
     def __init__(self):
         self.last_query_start = None
@@ -185,6 +209,28 @@ class DataEndpointIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(observed_at, cutoff - timedelta(seconds=2))
         self.assertIsNotNone(fake_pg.last_metrics_query_start)
         self.assertGreaterEqual(fake_pg.last_metrics_query_start, cutoff - timedelta(seconds=2))
+
+    async def test_historical_ohlc_includes_expected_open_close(self):
+        data.postgres_service = _OHLCPostgresService()
+
+        response = await data.historical_ohlc(pair="EURUSD", interval="4H", limit=10)
+
+        self.assertEqual(response.status_code, 200)
+        payload = json.loads(response.body)
+        self.assertEqual(payload.get("interval"), "4h")
+        self.assertEqual(payload.get("count"), 1)
+        candle = payload["candles"][0]
+        self.assertIn("expected_open", candle)
+        self.assertIn("expected_close", candle)
+
+    async def test_stream_ohlc_metadata_includes_expected_open_close(self):
+        data.postgres_service = _StreamOHLCPostgresService()
+
+        ohlc = await data._build_stream_ohlc_for_pair("EURUSD", 1.13, "15m")
+
+        self.assertIsNotNone(ohlc)
+        self.assertIn("expected_open", ohlc)
+        self.assertIn("expected_close", ohlc)
 
 
 if __name__ == "__main__":

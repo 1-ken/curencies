@@ -78,6 +78,7 @@ class AlertResponse(BaseModel):
     created_at: str
     triggered_at: Optional[str] = None
     last_checked_price: Optional[float] = None
+    close_price: Optional[float] = None
     
     # Legacy price alert fields
     target_price: Optional[float] = None
