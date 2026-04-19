@@ -20,37 +20,6 @@ from playwright.async_api import (
 logger = logging.getLogger(__name__)
 
 
-COMMODITY_TRADER_SYMBOLS = {
-    "E-Mini S&P 500": "US500",
-    "Mini Dow Jones Indus.-$5": "US30",
-    "Nasdaq 100": "NAS100",
-    "E-mini Russell 2000": "US2000",
-    "E-mini Russell 2000 Index Futur": "US2000",
-    "U.S. Treasury Bond": "USBOND",
-    "10-Year T-Note": "US10Y",
-    "5-Year T-Note": "US05Y",
-    "2-Year T-Note": "US02Y",
-    "Gold": "XAUUSD",
-    "Micro Gold": "XAUUSD",
-    "Silver": "XAGUSD",
-    "Micro Silver": "XAGUSD",
-    "Platinum": "XPTUSD",
-    "Copper": "COPPER",
-    "Palladium": "XPDUSD",
-    "Crude Oil": "USOIL",
-    "Brent Crude Oil": "UKOIL",
-    "Natural Gas": "NATGAS",
-    "Heating Oil": "HEATINGOIL",
-    "RBOB Gasoline": "GASOLINE",
-    "Corn": "CORN",
-    "Soybean": "SOYBEAN",
-    "KC HRW Wheat": "WHEAT",
-    "Cotton": "COTTON",
-    "Coffee": "COFFEE",
-    "Cocoa": "COCOA",
-}
-
-
 class SiteObserver:
     def __init__(
         self,
@@ -191,15 +160,15 @@ class SiteObserver:
             # Check for and handle cookie consent popup (Yahoo Finance)
             await self._handle_cookie_consent()
             
-            # Don't wait for networkidle - modern sites never reach it
-            # Instead, wait for the specific table element to appear
+            # Don't wait for networkidle - modern sites never reach it.
+            # Instead, wait for source-specific selectors to appear.
             try:
-                await self.page.wait_for_selector(self.wait_selector, timeout=30000)
+                await self._wait_for_data_ready_selector()
             except Exception as e:
                 logger.warning(f"Wait selector timeout: {e}. Continuing anyway...")
                 # Still try to fall back to table selector
                 try:
-                    await self.page.wait_for_selector(self.table_selector, timeout=10000)
+                    await self._wait_for_table_selector_fallback()
                 except Exception as e2:
                     logger.warning(f"Table selector also not found: {e2}. Proceeding with extraction...")
                     # Take a screenshot for debugging
@@ -213,10 +182,11 @@ class SiteObserver:
                     try:
                         content = await self.page.content()
                         logger.info(f"Page HTML length: {len(content)} characters")
-                        logger.info(f"Page title: {await self.page.title()}")
-                        # Check if we got an error page or captcha
-                        if "captcha" in content.lower() or "access denied" in content.lower():
-                            logger.error("Page appears to show captcha or access denied message")
+                        page_title = await self.page.title()
+                        logger.info(f"Page title: {page_title}")
+                        # Check if we likely got an anti-bot/access block page.
+                        if self._looks_like_blocked_page(content, page_title):
+                            logger.error("Page appears to show a bot-check or access denied page")
                     except Exception as e4:
                         logger.error(f"Failed to get page content: {e4}")
             logger.info("Browser started successfully")
@@ -281,6 +251,67 @@ class SiteObserver:
             
         except Exception as e:
             logger.debug(f"Error while handling cookie consent: {e}. Continuing anyway...")
+
+    async def _wait_for_data_ready_selector(self) -> None:
+        """Wait for source-specific row selector(s) that indicate data is ready."""
+        if not self.page:
+            raise RuntimeError("Page not initialized")
+
+        if self.source_name.lower() != "commodities":
+            await self.page.wait_for_selector(self.wait_selector, timeout=30000)
+            return
+
+        selectors = [
+            self.wait_selector,
+            "table[id^='commodity-'] tbody tr[data-symbol]",
+            "table.table-heatmap tbody tr[data-symbol]",
+            "div.card table tbody tr[data-symbol]",
+        ]
+        for selector in selectors:
+            try:
+                await self.page.wait_for_selector(selector, timeout=10000)
+                return
+            except Exception:
+                continue
+        raise TimeoutError("No commodities row selector became available")
+
+    async def _wait_for_table_selector_fallback(self) -> None:
+        """Wait for source-specific table selector(s) as secondary readiness fallback."""
+        if not self.page:
+            raise RuntimeError("Page not initialized")
+
+        if self.source_name.lower() != "commodities":
+            await self.page.wait_for_selector(self.table_selector, timeout=10000)
+            return
+
+        selectors = [
+            self.table_selector,
+            "table[id^='commodity-']",
+            "table.table-heatmap",
+            "div.card table.table",
+        ]
+        for selector in selectors:
+            try:
+                await self.page.wait_for_selector(selector, timeout=5000)
+                return
+            except Exception:
+                continue
+        raise TimeoutError("No commodities table selector became available")
+
+    @staticmethod
+    def _looks_like_blocked_page(content: str, page_title: str) -> bool:
+        """Heuristic to detect anti-bot/access-denied pages while avoiding noisy false positives."""
+        haystack = f"{page_title}\n{content}".lower()
+        indicators = [
+            "access denied",
+            "verify you are human",
+            "are you a robot",
+            "captcha challenge",
+            "cf-challenge",
+            "cloudflare ray id",
+            "just a moment",
+        ]
+        return any(token in haystack for token in indicators)
 
     async def shutdown(self) -> None:
         """Clean up browser resources."""
@@ -377,6 +408,10 @@ class SiteObserver:
         """Extract currency pairs with current price and percentage change from the table."""
         if not self.page:
             return []
+
+        if self.source_name.lower() == "commodities":
+            return await self._extract_tradingeconomics_commodities()
+
         js = f"""
         (() => {{
             const table = document.querySelector('{self.table_selector}');
@@ -415,36 +450,101 @@ class SiteObserver:
         }})()
         """
         pairs_data: List[Dict[str, Any]] = await self.page.evaluate(js)
-
-        if self.source_name.lower() == "commodities":
-            normalized: List[Dict[str, Any]] = []
-            for item in pairs_data:
-                full_name = str(item.get("pair") or "").strip()
-                if not full_name:
-                    continue
-                common_name = self._normalize_commodity_name(full_name)
-                trader_pair = self._to_trader_symbol(common_name)
-                row = dict(item)
-                row["pair"] = trader_pair
-                row["common_name"] = common_name
-                normalized.append(row)
-            return normalized
-
         return pairs_data
 
-    @staticmethod
-    def _normalize_commodity_name(name: str) -> str:
-        cleaned = re.sub(r"\s+", " ", name).strip()
-        cleaned = re.sub(r",?\s*[A-Z][a-z]{2}-\d{4}$", "", cleaned)
-        cleaned = re.sub(r"\s+[A-Z][a-z]{2}\s+\d{2}$", "", cleaned)
-        cleaned = re.sub(r"\s+Futures,?[A-Za-z0-9\-]*$", "", cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r"\s+Futures$", "", cleaned, flags=re.IGNORECASE)
-        cleaned = re.sub(r"\s+Last Day Financ$", "", cleaned, flags=re.IGNORECASE)
-        return cleaned.strip(" ,-") or name
+    async def _extract_tradingeconomics_commodities(self) -> List[Dict[str, Any]]:
+        """Extract commodity rows from TradingEconomics commodities table."""
+        if not self.page:
+            return []
+
+        js = f"""
+        (() => {{
+            const hasCommodityRows = (table) =>
+                !!table && table.querySelectorAll('tbody tr[data-symbol]').length > 0;
+
+            const hasMetalsHeader = (table) => {{
+                if (!table) return false;
+                const headers = Array.from(table.querySelectorAll('thead th'));
+                return headers.some(th => /metals/i.test((th.textContent || '').trim()));
+            }};
+
+            const candidates = [];
+            const configured = document.querySelector('{self.table_selector}');
+            if (configured) candidates.push(configured);
+            document.querySelectorAll("table[id^='commodity-'], table.table-heatmap, div.card table.table")
+              .forEach(t => candidates.push(t));
+
+            let table = null;
+            for (const candidate of candidates) {{
+                if (!hasCommodityRows(candidate)) continue;
+                if (hasMetalsHeader(candidate)) {{
+                    table = candidate;
+                    break;
+                }}
+                if (!table) table = candidate;
+            }}
+
+            if (!table) return [];
+
+            const rows = table.querySelectorAll('tbody tr');
+            return Array.from(rows).map(row => {{
+                const dataSymbol = (row.getAttribute('data-symbol') || '').trim();
+                if (!dataSymbol) return null;
+
+                const cells = row.querySelectorAll('td');
+                if (cells.length < 2) return null;
+
+                const nameCell = cells[0];
+                const commonName = (
+                    nameCell.querySelector('b')?.textContent ||
+                    nameCell.querySelector('a')?.textContent ||
+                    nameCell.textContent ||
+                    ''
+                ).trim();
+
+                const priceText = (cells[1]?.textContent || '').replace(/,/g, '').trim();
+                const priceMatch = priceText.match(/([+-]?\\d+(?:\\.\\d+)?)/);
+
+                const percentCell = row.querySelector('td#pch');
+                return {{
+                    pair: dataSymbol,
+                    common_name: commonName,
+                    price: priceMatch ? priceMatch[1] : priceText,
+                    change_text: percentCell?.textContent || cells[3]?.textContent || row.textContent || '',
+                }};
+            }}).filter(item => item && item.pair && item.price);
+        }})()
+        """
+        raw_rows: List[Dict[str, Any]] = await self.page.evaluate(js)
+        return self._normalize_tradingeconomics_commodities(raw_rows)
 
     @staticmethod
-    def _to_trader_symbol(common_name: str) -> str:
-        return COMMODITY_TRADER_SYMBOLS.get(common_name, common_name)
+    def _normalize_tradingeconomics_commodities(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Normalize TradingEconomics commodity rows into payload format."""
+        normalized: List[Dict[str, Any]] = []
+        for row in rows or []:
+            pair = str(row.get("pair") or "").strip()
+            price = str(row.get("price") or "").strip()
+            if not pair or not price:
+                continue
+
+            change = None
+            change_match = re.search(
+                r"([+-]?\d+(?:\.\d+)?)\s*%",
+                str(row.get("change_text") or "").replace(",", ""),
+            )
+            if change_match:
+                change = change_match.group(1)
+
+            normalized.append(
+                {
+                    "pair": pair,
+                    "common_name": str(row.get("common_name") or "").strip(),
+                    "price": price,
+                    "change": change,
+                }
+            )
+        return normalized
 
     @staticmethod
     def _parse_majors_from_texts(texts: List[str], majors: List[str]) -> List[str]:

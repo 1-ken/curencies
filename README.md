@@ -10,6 +10,7 @@ Edit `config.json`:
 	- `name`: Source label (e.g., `currencies`, `commodities`).
 	- `url`: Target page URL.
 	- `waitSelector`, `tableSelector`, `pairCellSelector`: CSS selectors for extraction.
+	- For TradingEconomics commodities, `pair` is extracted from the row `data-symbol` attribute and `common_name` from the first cell label.
 	- `injectMutationObserver`: Enable DOM mutation tracking for that source.
 	- `filterByMajors`: If true, keep only rows matching configured `majors`.
 	- `enabled`: Enable/disable source without removing config.
@@ -100,7 +101,7 @@ Each snapshot payload:
 
 Notes:
 - `pairs.currencies` and `pairs.commodities` are always present as arrays (possibly empty).
-- Commodity `pair` is normalized to trader-common symbols (e.g., `XAUUSD`, `NAS100`) and `common_name` contains readable labels (e.g., `Gold`, `Nasdaq 100`).
+- Commodity `pair` comes from TradingEconomics row `data-symbol` (e.g., `XAUUSD:CUR`, `HG1:COM`) and `common_name` contains readable labels (e.g., `Gold`, `Copper`).
 
 ## Data retention policy
 - Historical and telemetry rows are retained for 14 calendar days.

@@ -12,10 +12,10 @@
     },
     {
       "name": "commodities",
-      "url": "https://finance.yahoo.com/markets/commodities/",
-      "waitSelector": "table tbody tr",
-      "tableSelector": "table",
-      "pairCellSelector": "tbody tr td[data-testid-cell='companyshortname.raw']",
+      "url": "https://tradingeconomics.com/commodities",
+      "waitSelector": "table[id^='commodity-'] tbody tr[data-symbol]",
+      "tableSelector": "table[id^='commodity-']",
+      "pairCellSelector": "tbody tr td.datatable-item-first b",
       "injectMutationObserver": true,
       "filterByMajors": false,
       "enabled": true
