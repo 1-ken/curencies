@@ -1,2 +1,5 @@
+[phases.install]
+cmds = ["python -m playwright install chromium"]
+
 [start]
 cmd = "python run_uvicorn.py"
