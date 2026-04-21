@@ -5,6 +5,34 @@ import unittest
 from app.services.observer_service import SiteObserver
 
 
+class _FakeLocator:
+    def __init__(self, page, selector: str):
+        self._page = page
+        self._selector = selector
+
+    def locator(self, nested_selector: str):
+        return _FakeLocator(self._page, f"{self._selector} >> {nested_selector}")
+
+    async def count(self):
+        if self._selector in self._page.selector_counts:
+            return self._page.selector_counts[self._selector]
+        return self._page.selector_counts.get(self._selector.split(" >> ")[-1], 0)
+
+    async def all_inner_texts(self):
+        return self._page.selector_texts.get(self._selector, [])
+
+
+class _FakePage:
+    def __init__(self, selector_counts=None, selector_texts=None):
+        self.selector_counts = selector_counts or {}
+        self.selector_texts = selector_texts or {}
+        self.seen_selectors = []
+
+    def locator(self, selector: str):
+        self.seen_selectors.append(selector)
+        return _FakeLocator(self, selector)
+
+
 class TradingEconomicsCommodityParsingTests(unittest.TestCase):
     def test_extracts_symbol_price_and_change(self):
         rows = [
@@ -78,6 +106,32 @@ class TradingEconomicsCommodityParsingTests(unittest.TestCase):
             page_title="Commodities - Live Quote Price Trading Data",
         )
         self.assertFalse(blocked)
+
+
+class TradingEconomicsCommoditySelectorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_selects_quoted_commodity_selector_without_js_interpolation(self):
+        page = _FakePage(
+            selector_counts={
+                "table[id^='commodity-']": 1,
+                "table[id^='commodity-'] >> tbody tr[data-symbol]": 1,
+                "table[id^='commodity-'] >> thead th": 1,
+            },
+            selector_texts={
+                "table[id^='commodity-'] >> thead th": ["Metals"],
+            },
+        )
+        observer = SiteObserver(
+            url="https://example.com",
+            table_selector="table[id^='commodity-']",
+            pair_cell_selector="tbody tr td.datatable-item-first b",
+            source_name="commodities",
+        )
+        observer.page = page
+
+        table = await observer._select_tradingeconomics_commodity_table()
+
+        self.assertIsNotNone(table)
+        self.assertIn("table[id^='commodity-']", page.seen_selectors)
 
 
 if __name__ == "__main__":

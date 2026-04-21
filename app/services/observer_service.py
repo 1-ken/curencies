@@ -393,16 +393,14 @@ class SiteObserver:
     async def _extract_pair_cells_text(self) -> List[str]:
         if not self.page:
             return []
-        js = f"""
-        (() => {{
-            const table = document.querySelector('{self.table_selector}');
-            if (!table) return [];
-            const cells = table.querySelectorAll('{self.pair_cell_selector}');
-            return Array.from(cells).map(td => td.textContent.trim()).filter(Boolean);
-        }})()
-        """
-        texts: List[str] = await self.page.evaluate(js)
-        return texts
+
+        table = self.page.locator(self.table_selector)
+        if await table.count() == 0:
+            return []
+
+        cells = table.locator(self.pair_cell_selector)
+        texts = await cells.all_inner_texts()
+        return [text.strip() for text in texts if text and text.strip()]
 
     async def _extract_pairs_with_prices(self) -> List[Dict[str, Any]]:
         """Extract currency pairs with current price and percentage change from the table."""
@@ -457,66 +455,96 @@ class SiteObserver:
         if not self.page:
             return []
 
-        js = f"""
-        (() => {{
-            const hasCommodityRows = (table) =>
-                !!table && table.querySelectorAll('tbody tr[data-symbol]').length > 0;
+        table = await self._select_tradingeconomics_commodity_table()
+        if table is None:
+            return []
 
-            const hasMetalsHeader = (table) => {{
-                if (!table) return false;
-                const headers = Array.from(table.querySelectorAll('thead th'));
-                return headers.some(th => /metals/i.test((th.textContent || '').trim()));
-            }};
+        rows = table.locator("tbody tr")
+        row_count = await rows.count()
+        raw_rows: List[Dict[str, Any]] = []
 
-            const candidates = [];
-            const configured = document.querySelector('{self.table_selector}');
-            if (configured) candidates.push(configured);
-            document.querySelectorAll("table[id^='commodity-'], table.table-heatmap, div.card table.table")
-              .forEach(t => candidates.push(t));
+        for index in range(row_count):
+            row = rows.nth(index)
+            data_symbol = (await row.get_attribute("data-symbol") or "").strip()
+            if not data_symbol:
+                continue
 
-            let table = null;
-            for (const candidate of candidates) {{
-                if (!hasCommodityRows(candidate)) continue;
-                if (hasMetalsHeader(candidate)) {{
-                    table = candidate;
-                    break;
-                }}
-                if (!table) table = candidate;
-            }}
+            cells = row.locator("td")
+            if await cells.count() < 2:
+                continue
 
-            if (!table) return [];
+            name_cell = cells.nth(0)
+            common_name = ""
+            for selector in ("b", "a"):
+                try:
+                    candidate = name_cell.locator(selector)
+                    if await candidate.count() > 0:
+                        common_name = (await candidate.first.text_content() or "").strip()
+                        if common_name:
+                            break
+                except Exception:
+                    continue
+            if not common_name:
+                common_name = (await name_cell.text_content() or "").strip()
 
-            const rows = table.querySelectorAll('tbody tr');
-            return Array.from(rows).map(row => {{
-                const dataSymbol = (row.getAttribute('data-symbol') || '').trim();
-                if (!dataSymbol) return null;
+            price_text = (await cells.nth(1).text_content() or "").replace(",", "").strip()
+            price_match = re.search(r"([+-]?\d+(?:\.\d+)?)", price_text)
 
-                const cells = row.querySelectorAll('td');
-                if (cells.length < 2) return null;
+            change_text = ""
+            try:
+                percent_cell = row.locator("td#pch")
+                if await percent_cell.count() > 0:
+                    change_text = (await percent_cell.first.text_content() or "").strip()
+            except Exception:
+                change_text = ""
 
-                const nameCell = cells[0];
-                const commonName = (
-                    nameCell.querySelector('b')?.textContent ||
-                    nameCell.querySelector('a')?.textContent ||
-                    nameCell.textContent ||
-                    ''
-                ).trim();
+            if not change_text:
+                try:
+                    if await cells.count() > 3:
+                        change_text = (await cells.nth(3).text_content() or "").strip()
+                except Exception:
+                    change_text = ""
 
-                const priceText = (cells[1]?.textContent || '').replace(/,/g, '').trim();
-                const priceMatch = priceText.match(/([+-]?\\d+(?:\\.\\d+)?)/);
+            raw_rows.append(
+                {
+                    "pair": data_symbol,
+                    "common_name": common_name,
+                    "price": price_match.group(1) if price_match else price_text,
+                    "change_text": change_text,
+                }
+            )
 
-                const percentCell = row.querySelector('td#pch');
-                return {{
-                    pair: dataSymbol,
-                    common_name: commonName,
-                    price: priceMatch ? priceMatch[1] : priceText,
-                    change_text: percentCell?.textContent || cells[3]?.textContent || row.textContent || '',
-                }};
-            }}).filter(item => item && item.pair && item.price);
-        }})()
-        """
-        raw_rows: List[Dict[str, Any]] = await self.page.evaluate(js)
         return self._normalize_tradingeconomics_commodities(raw_rows)
+
+    async def _select_tradingeconomics_commodity_table(self) -> Optional[Any]:
+        if not self.page:
+            return None
+
+        selectors = [
+            self.table_selector,
+            "table[id^='commodity-']",
+            "table.table-heatmap",
+            "div.card table.table",
+        ]
+
+        for selector in selectors:
+            try:
+                table = self.page.locator(selector)
+                rows = table.locator("tbody tr[data-symbol]")
+                if await rows.count() == 0:
+                    continue
+
+                headers = table.locator("thead th")
+                header_count = await headers.count()
+                header_texts = await headers.all_inner_texts() if header_count > 0 else []
+                if any("metals" in str(text).strip().lower() for text in header_texts):
+                    return table
+
+                return table
+            except Exception:
+                continue
+
+        return None
 
     @staticmethod
     def _normalize_tradingeconomics_commodities(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
