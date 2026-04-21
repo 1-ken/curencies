@@ -167,8 +167,9 @@ async def _collect_snapshot_from_observers() -> Dict[str, Any]:
             if isinstance(result, asyncio.TimeoutError):
                 timeout_failures += 1
             logger.error(
-                "Snapshot failed for observer '%s': %s",
+                "Snapshot failed for observer '%s': %s (%r)",
                 source_name,
+                type(result).__name__,
                 result,
             )
             continue

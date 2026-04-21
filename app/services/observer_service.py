@@ -455,64 +455,62 @@ class SiteObserver:
         if not self.page:
             return []
 
-        table = await self._select_tradingeconomics_commodity_table()
-        if table is None:
-            return []
+        selectors = [
+            self.table_selector,
+            "table[id^='commodity-']",
+            "table.table-heatmap",
+            "div.card table.table",
+        ]
 
-        rows = table.locator("tbody tr")
-        row_count = await rows.count()
-        raw_rows: List[Dict[str, Any]] = []
+        raw_rows: List[Dict[str, Any]] = await self.page.evaluate(
+            """
+            (selectors) => {
+                const normalize = (value) => (value || '').toString().trim();
+                const chooseTable = () => {
+                    for (const selector of selectors) {
+                        const table = document.querySelector(selector);
+                        if (!table) continue;
+                        const hasRows = table.querySelectorAll('tbody tr[data-symbol]').length > 0;
+                        if (hasRows) return table;
+                    }
+                    return null;
+                };
 
-        for index in range(row_count):
-            row = rows.nth(index)
-            data_symbol = (await row.get_attribute("data-symbol") or "").strip()
-            if not data_symbol:
-                continue
+                const table = chooseTable();
+                if (!table) return [];
 
-            cells = row.locator("td")
-            if await cells.count() < 2:
-                continue
+                const rows = Array.from(table.querySelectorAll('tbody tr[data-symbol]'));
+                return rows.map((row) => {
+                    const dataSymbol = normalize(row.getAttribute('data-symbol'));
+                    if (!dataSymbol) return null;
 
-            name_cell = cells.nth(0)
-            common_name = ""
-            for selector in ("b", "a"):
-                try:
-                    candidate = name_cell.locator(selector)
-                    if await candidate.count() > 0:
-                        common_name = (await candidate.first.text_content() or "").strip()
-                        if common_name:
-                            break
-                except Exception:
-                    continue
-            if not common_name:
-                common_name = (await name_cell.text_content() or "").strip()
+                    const cells = row.querySelectorAll('td');
+                    if (!cells || cells.length < 2) return null;
 
-            price_text = (await cells.nth(1).text_content() or "").replace(",", "").strip()
-            price_match = re.search(r"([+-]?\d+(?:\.\d+)?)", price_text)
+                    const nameCell = cells[0];
+                    const commonName = normalize(
+                        nameCell?.querySelector('b')?.textContent
+                        || nameCell?.querySelector('a')?.textContent
+                        || nameCell?.textContent
+                    );
 
-            change_text = ""
-            try:
-                percent_cell = row.locator("td#pch")
-                if await percent_cell.count() > 0:
-                    change_text = (await percent_cell.first.text_content() or "").strip()
-            except Exception:
-                change_text = ""
+                    const priceRaw = normalize(cells[1]?.textContent).replace(/,/g, '');
+                    const priceMatch = priceRaw.match(/([+-]?\d+(?:\.\d+)?)/);
 
-            if not change_text:
-                try:
-                    if await cells.count() > 3:
-                        change_text = (await cells.nth(3).text_content() or "").strip()
-                except Exception:
-                    change_text = ""
+                    const percentCell = row.querySelector('td#pch');
+                    const changeText = normalize(percentCell?.textContent || cells[3]?.textContent || '');
 
-            raw_rows.append(
-                {
-                    "pair": data_symbol,
-                    "common_name": common_name,
-                    "price": price_match.group(1) if price_match else price_text,
-                    "change_text": change_text,
-                }
-            )
+                    return {
+                        pair: dataSymbol,
+                        common_name: commonName,
+                        price: priceMatch ? priceMatch[1] : priceRaw,
+                        change_text: changeText,
+                    };
+                }).filter(Boolean);
+            }
+            """,
+            selectors,
+        )
 
         return self._normalize_tradingeconomics_commodities(raw_rows)
 
