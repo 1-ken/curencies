@@ -48,13 +48,59 @@ class SiteObserver:
         self.snapshot_count = 0
         self.context_created_at: Optional[datetime] = None
         self.CONTEXT_RESET_INTERVAL = 3600  # 1 hour in seconds
-        self.CONTEXT_RESET_SNAPSHOT_COUNT = 300  # Reset after 300 snapshots
+        self.CONTEXT_RESET_SNAPSHOT_COUNT = 1200  # Reset after 1200 snapshots
         self.NAVIGATION_TIMEOUT_MS = 15000
         self.NAVIGATION_TIMEOUT_MAX_MS = 45000
         self.NAVIGATION_RETRY_ATTEMPTS = 3
         self._context_reset_lock = asyncio.Lock()
         self._snapshot_lock = asyncio.Lock()
         self._is_resetting_context = False
+
+    @staticmethod
+    def _is_consent_or_blocked(url: str, title: str) -> bool:
+        marker = f"{(url or '').lower()}\n{(title or '').lower()}"
+        return any(
+            token in marker
+            for token in (
+                "consent.yahoo.com",
+                "collectconsent",
+                "privacy settings",
+                "parametres de confidentialite",
+                "parametres de confidentialit",
+                "vos parametres de confidentialite",
+                "access denied",
+                "verify you are human",
+                "captcha",
+            )
+        )
+
+    async def _ensure_source_ready(self, *, force_navigate: bool = False) -> None:
+        """Ensure page is on the expected source URL and data selectors are available."""
+        if not self.page:
+            return
+
+        try:
+            current_url = self.page.url
+            current_title = await self.page.title()
+        except Exception:
+            current_url = ""
+            current_title = ""
+
+        if force_navigate or self._is_consent_or_blocked(current_url, current_title):
+            logger.warning(
+                "[%s] Page appears redirected/blocked (title=%s, url=%s); attempting recovery",
+                self.source_name,
+                current_title,
+                current_url,
+            )
+            await self._handle_cookie_consent()
+            await self._navigate_with_retry()
+            await self._handle_cookie_consent()
+
+        try:
+            await self._wait_for_data_ready_selector()
+        except Exception:
+            await self._wait_for_table_selector_fallback()
 
     def _needs_context_reset(self) -> bool:
         if not self.context_created_at:
@@ -211,10 +257,16 @@ class SiteObserver:
             # Try multiple possible selectors for the "Accept all" button
             selectors = [
                 'button[name="agree"][value="agree"]',  # Yahoo Finance specific
+                'button[name="agree"]',
+                'button[value="agree"]',
                 'button.accept-all',
                 'button.consent_reject_all_2',
                 'button:has-text("Accepter tout")',  # French version
+                'button:has-text("Tout accepter")',
                 'button:has-text("Accept all")',  # English version
+                'button:has-text("I agree")',
+                'button:has-text("Agree")',
+                'button[type="submit"]',
             ]
             
             for selector in selectors:
@@ -378,8 +430,7 @@ class SiteObserver:
 
                 if self.browser:
                     await self._create_context_and_page()
-                    await self._navigate_with_retry()
-                    await self._handle_cookie_consent()
+                    await self._ensure_source_ready(force_navigate=True)
                     await self._inject_mutation_observer_script()
 
                     self.snapshot_count = 0
@@ -451,65 +502,105 @@ class SiteObserver:
         return pairs_data
 
     async def _extract_tradingeconomics_commodities(self) -> List[Dict[str, Any]]:
-        """Extract commodity rows from TradingEconomics commodities table."""
+        """Extract commodity rows from ALL TradingEconomics commodity tables.
+        
+        Handles multiple tables with dynamic CSS classes by:
+        - Scanning all tables with data-symbol rows
+        - Mapping tables to groups using hidden input[id$='_group'] elements
+        - Extracting values using stable structural selectors (data-symbol, cell position)
+        - Avoiding brittle ID-based selectors (#p, #pch) which repeat across tables
+        """
         if not self.page:
             return []
 
-        selectors = [
-            self.table_selector,
-            "table[id^='commodity-']",
-            "table.table-heatmap",
-            "div.card table.table",
-        ]
-
         raw_rows: List[Dict[str, Any]] = await self.page.evaluate(
             """
-            (selectors) => {
+            () => {
                 const normalize = (value) => (value || '').toString().trim();
-                const chooseTable = () => {
-                    for (const selector of selectors) {
-                        const table = document.querySelector(selector);
-                        if (!table) continue;
-                        const hasRows = table.querySelectorAll('tbody tr[data-symbol]').length > 0;
-                        if (hasRows) return table;
-                    }
-                    return null;
-                };
-
-                const table = chooseTable();
-                if (!table) return [];
-
-                const rows = Array.from(table.querySelectorAll('tbody tr[data-symbol]'));
-                return rows.map((row) => {
-                    const dataSymbol = normalize(row.getAttribute('data-symbol'));
-                    if (!dataSymbol) return null;
-
-                    const cells = row.querySelectorAll('td');
-                    if (!cells || cells.length < 2) return null;
-
-                    const nameCell = cells[0];
-                    const commonName = normalize(
-                        nameCell?.querySelector('b')?.textContent
-                        || nameCell?.querySelector('a')?.textContent
-                        || nameCell?.textContent
+                
+                // Build table-to-group map using hidden input[id$='_group'] elements
+                const buildTableGroupMap = () => {
+                    const map = new Map(); // table element -> group name
+                    const groupInputs = Array.from(
+                        document.querySelectorAll("input[id$='_group']")
                     );
-
-                    const priceRaw = normalize(cells[1]?.textContent).replace(/,/g, '');
-                    const priceMatch = priceRaw.match(/([+-]?\d+(?:\.\d+)?)/);
-
-                    const percentCell = row.querySelector('td#pch');
-                    const changeText = normalize(percentCell?.textContent || cells[3]?.textContent || '');
-
-                    return {
-                        pair: dataSymbol,
-                        common_name: commonName,
-                        price: priceMatch ? priceMatch[1] : priceRaw,
-                        change_text: changeText,
-                    };
-                }).filter(Boolean);
+                    
+                    groupInputs.forEach((input) => {
+                        const groupValue = normalize(input.value);
+                        if (!groupValue) return;
+                        
+                        // Find the nearest table that follows this input
+                        let current = input;
+                        while (current && current !== document.body) {
+                            current = current.nextElementSibling || current.parentElement?.nextElementSibling;
+                            if (!current) break;
+                            
+                            const table = current.querySelector('table[id^="commodity-"]')
+                                || current.querySelector('table.table-heatmap');
+                            if (table && table.querySelectorAll('tbody tr[data-symbol]').length > 0) {
+                                map.set(table, groupValue);
+                                break;
+                            }
+                        }
+                    });
+                    
+                    return map;
+                };
+                
+                const tableGroupMap = buildTableGroupMap();
+                
+                // Collect all commodity tables (those with tbody tr[data-symbol])
+                const allTables = Array.from(
+                    document.querySelectorAll('table[id^="commodity-"], table.table-heatmap')
+                ).filter(table => table.querySelectorAll('tbody tr[data-symbol]').length > 0);
+                
+                const allRows = [];
+                
+                allTables.forEach((table, tableIndex) => {
+                    const group = tableGroupMap.get(table) || `Table${tableIndex}`;
+                    const rows = Array.from(table.querySelectorAll('tbody tr[data-symbol]'));
+                    
+                    rows.forEach((row) => {
+                        const dataSymbol = normalize(row.getAttribute('data-symbol'));
+                        if (!dataSymbol) return;
+                        
+                        // Use positional cell access instead of brittle ID-based selectors
+                        // IDs like 'p', 'pch', 'nch', 'date' repeat across rows and tables
+                        const cells = row.querySelectorAll('td');
+                        if (!cells || cells.length < 2) return;
+                        
+                        // Cell 0: name cell
+                        const nameCell = cells[0];
+                        const commonName = normalize(
+                            nameCell?.querySelector('b')?.textContent
+                            || nameCell?.querySelector('a')?.textContent
+                            || nameCell?.textContent
+                        );
+                        
+                        // Cell 1: price
+                        const priceRaw = normalize(cells[1]?.textContent || '').replace(/,/g, '');
+                        const priceMatch = priceRaw.match(/([+-]?\d+(?:\.\d+)?)/);
+                        
+                        // Cell 2: change (day change, usually right after price)
+                        let changeText = '';
+                        if (cells.length > 2) {
+                            changeText = normalize(cells[2]?.textContent || '');
+                        }
+                        
+                        allRows.push({
+                            group,
+                            group_rank: tableIndex,
+                            pair: dataSymbol,
+                            common_name: commonName,
+                            price: priceMatch ? priceMatch[1] : priceRaw,
+                            change_text: changeText,
+                        });
+                    });
+                });
+                
+                return allRows;
             }
             """,
-            selectors,
         )
 
         return self._normalize_tradingeconomics_commodities(raw_rows)
@@ -546,31 +637,63 @@ class SiteObserver:
 
     @staticmethod
     def _normalize_tradingeconomics_commodities(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Normalize TradingEconomics commodity rows into payload format."""
-        normalized: List[Dict[str, Any]] = []
-        for row in rows or []:
+        """Normalize TradingEconomics commodity rows into payload format.
+        
+        Filters for Metals group only, deduplicates by pair (preferring higher quality),
+        and returns normalized shape compatible with downstream API.
+        """
+        # Keep only Metals group rows
+        metals_rows = [
+            row for row in (rows or [])
+            if str(row.get("group", "")).strip().lower() == "metals"
+        ]
+        
+        # Deduplicate by pair, preferring rows with valid numeric price and common name
+        seen_pairs: Dict[str, Dict[str, Any]] = {}
+        
+        for row in metals_rows:
             pair = str(row.get("pair") or "").strip()
             price = str(row.get("price") or "").strip()
+            common_name = str(row.get("common_name") or "").strip()
+            change_text = str(row.get("change_text") or "").strip()
+            
             if not pair or not price:
                 continue
-
+            
+            # Score row quality: valid price + non-empty name + parseable change
+            has_valid_price = bool(re.match(r"[+-]?\d+(?:\.\d+)?", price))
+            has_name = len(common_name) > 0
+            has_change = bool(re.search(r"[+-]?\d+", change_text))
+            quality_score = sum([has_valid_price, has_name, has_change])
+            
+            # Extract numeric change percentage
             change = None
             change_match = re.search(
-                r"([+-]?\d+(?:\.\d+)?)\s*%",
-                str(row.get("change_text") or "").replace(",", ""),
+                r"([+-]?\d+(?:\.\d+)?)\s*%?",
+                change_text.replace(",", ""),
             )
             if change_match:
                 change = change_match.group(1)
-
-            normalized.append(
-                {
-                    "pair": pair,
-                    "common_name": str(row.get("common_name") or "").strip(),
-                    "price": price,
-                    "change": change,
-                }
-            )
-        return normalized
+            
+            normalized_row = {
+                "pair": pair,
+                "common_name": common_name,
+                "price": price,
+                "change": change,
+            }
+            
+            # Keep row if it's new or higher quality than existing
+            if pair not in seen_pairs or quality_score > seen_pairs[pair].get("_quality", -1):
+                normalized_row["_quality"] = quality_score
+                seen_pairs[pair] = normalized_row
+        
+        # Remove internal quality marker and return
+        result = [
+            {k: v for k, v in row.items() if k != "_quality"}
+            for row in seen_pairs.values()
+        ]
+        
+        return result
 
     @staticmethod
     def _parse_majors_from_texts(texts: List[str], majors: List[str]) -> List[str]:
@@ -592,16 +715,28 @@ class SiteObserver:
             if self._needs_context_reset():
                 await self._reset_context()
 
+            # Lightweight self-heal in case the tab gets redirected to consent page between cycles.
+            try:
+                current_url = self.page.url
+                current_title = await self.page.title()
+                if self._is_consent_or_blocked(current_url, current_title):
+                    await self._ensure_source_ready(force_navigate=True)
+            except Exception:
+                pass
+
             pairs_with_prices = await self._extract_pairs_with_prices()
             self.snapshot_count += 1
             if not pairs_with_prices:
                 try:
                     title = await self.page.title()
                     logger.warning(
-                        "Snapshot returned no pairs; page title=%s, url=%s", title, self.page.url
+                        "[%s] Snapshot returned no pairs; page title=%s, url=%s",
+                        self.source_name,
+                        title,
+                        self.page.url,
                     )
                 except Exception:
-                    logger.warning("Snapshot returned no pairs and title fetch failed")
+                    logger.warning("[%s] Snapshot returned no pairs and title fetch failed", self.source_name)
             texts = [item["pair"] for item in pairs_with_prices]
             majors_found = self._parse_majors_from_texts(texts, majors)
 
