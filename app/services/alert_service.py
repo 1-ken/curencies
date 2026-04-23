@@ -319,11 +319,20 @@ class AlertManager:
 
     @staticmethod
     def _normalize_pair(pair: str) -> str:
-        """Normalize pair name: remove slashes, convert to uppercase.
+        """Normalize pair name: remove slashes, strip commodity suffixes, convert to uppercase.
         
-        Examples: 'EUR/USD' -> 'EURUSD', 'eurusd' -> 'EURUSD', 'EURUSD' -> 'EURUSD'
+        Handles both currency pairs and commodity pairs:
+        - Currency: 'EUR/USD' -> 'EURUSD', 'eurusd' -> 'EURUSD'
+        - Commodity: 'XAUUSD:CUR' -> 'XAUUSD', 'HG1:COM' -> 'HG1'
+        
+        This allows commodity alerts (created with :CUR/:COM suffix) to match 
+        incoming data (which comes from TradingEconomics without suffix).
         """
-        return pair.replace("/", "").upper()
+        normalized = pair.replace("/", "").upper()
+        # Strip commodity suffixes (:CUR, :COM, etc.) for commodity pair matching
+        if ":" in normalized:
+            normalized = normalized.split(":")[0]
+        return normalized
     def check_candle_alerts(self, ohlc_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Check candle-close threshold alerts against latest closed candles.
