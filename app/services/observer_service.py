@@ -48,7 +48,15 @@ class SiteObserver:
         self.snapshot_count = 0
         self.context_created_at: Optional[datetime] = None
         self.CONTEXT_RESET_INTERVAL = 3600  # 1 hour in seconds
-        self.CONTEXT_RESET_SNAPSHOT_COUNT = 1200  # Reset after 1200 snapshots
+        
+        # Stagger recycling per observer to avoid simultaneous recycling causing timeouts
+        # This prevents both observers from recycling at same time (issue #3 from log analysis)
+        if source_name == "commodities":
+            self.CONTEXT_RESET_SNAPSHOT_COUNT = 1200  # Recycle at 1200 snapshots
+        elif source_name == "currencies":
+            self.CONTEXT_RESET_SNAPSHOT_COUNT = 1350  # Offset by 150 to avoid collision
+        else:
+            self.CONTEXT_RESET_SNAPSHOT_COUNT = 2400  # Increased lifespan (2x longer) for other observers
         self.NAVIGATION_TIMEOUT_MS = 15000
         self.NAVIGATION_TIMEOUT_MAX_MS = 45000
         self.NAVIGATION_RETRY_ATTEMPTS = 3

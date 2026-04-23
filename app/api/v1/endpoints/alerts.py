@@ -39,6 +39,20 @@ async def create_alert(request: Union[CreateAlertRequest, CreateCandleAlertReque
     - CreateAlertRequest for price-based alerts (alert_type="price" or omitted)
     - CreateCandleAlertRequest for candle-close alerts (alert_type="candle_close")
     """
+    # Validate pair format first
+    pair = request.pair.strip()
+    if not pair:
+        raise HTTPException(status_code=400, detail="Pair name cannot be empty")
+    
+    # Validate commodity pair format if it contains a colon
+    if ':' in pair:
+        parts = pair.split(':')
+        if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
+            raise HTTPException(
+                status_code=400,
+                detail="Commodity pair must be in format 'SYMBOL:TYPE' (e.g., 'XAUUSD:CUR', 'HG1:COM')"
+            )
+    
     # Try to parse as candle alert first (has 'interval' field)
     if hasattr(request, 'interval') and request.interval:
         request.interval = request.interval.strip().lower()
