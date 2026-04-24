@@ -26,7 +26,7 @@
   "tableSelector": "table",
   "pairCellSelector": "tbody tr td:nth-child(2)",
   "streamIntervalSeconds": 0.5,
-  "snapshotTimeoutSeconds": 8,
+  "snapshotTimeoutSeconds": 30,
   "wsSendTimeoutSeconds": 3,
   "alertActionTimeoutSeconds": 8,
   "maxSnapshotFailures": 4,

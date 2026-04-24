@@ -94,13 +94,18 @@ class SiteObserver:
             current_url = ""
             current_title = ""
 
-        if force_navigate or self._is_consent_or_blocked(current_url, current_title):
-            logger.warning(
-                "[%s] Page appears redirected/blocked (title=%s, url=%s); attempting recovery",
-                self.source_name,
-                current_title,
-                current_url,
-            )
+        is_blocked = self._is_consent_or_blocked(current_url, current_title)
+        if force_navigate or is_blocked:
+            if is_blocked:
+                logger.warning(
+                    "[%s] Page appears redirected/blocked (title=%s, url=%s); attempting recovery",
+                    self.source_name,
+                    current_title,
+                    current_url,
+                )
+            else:
+                logger.info("[%s] Navigating to source URL: %s", self.source_name, self.url)
+            
             await self._handle_cookie_consent()
             await self._navigate_with_retry()
             await self._handle_cookie_consent()
@@ -254,10 +259,6 @@ class SiteObserver:
     async def _handle_cookie_consent(self) -> None:
         """Handle cookie consent popup if it appears on page load."""
         if not self.page:
-            return
-        
-        # Skip if context is being recycled to avoid race conditions
-        if self._is_resetting_context:
             return
         
         try:
@@ -537,7 +538,19 @@ class SiteObserver:
                         const groupValue = normalize(input.value);
                         if (!groupValue) return;
                         
-                        // Find the nearest table that follows this input
+                        // Strategy 1: Look for table in previous sibling (input often follows table)
+                        let prev = input.previousElementSibling;
+                        if (prev) {
+                            const table = prev.querySelector('table[id^="commodity-"]')
+                                || prev.querySelector('table.table-heatmap')
+                                || (prev.tagName === 'TABLE' ? prev : null);
+                            if (table && table.querySelectorAll('tbody tr[data-symbol]').length > 0) {
+                                map.set(table, groupValue);
+                                return;
+                            }
+                        }
+
+                        // Strategy 2: Look for table in next siblings (original logic)
                         let current = input;
                         while (current && current !== document.body) {
                             current = current.nextElementSibling || current.parentElement?.nextElementSibling;
@@ -647,23 +660,21 @@ class SiteObserver:
     def _normalize_tradingeconomics_commodities(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Normalize TradingEconomics commodity rows into payload format.
         
-        Filters for Metals group only, deduplicates by pair (preferring higher quality),
-        and returns normalized shape compatible with downstream API.
+        Deduplicates by pair (preferring higher quality), and returns 
+        normalized shape compatible with downstream API.
         """
-        # Keep only Metals group rows
-        metals_rows = [
-            row for row in (rows or [])
-            if str(row.get("group", "")).strip().lower() == "metals"
-        ]
+        # Accept all rows initially
+        all_rows = rows or []
         
         # Deduplicate by pair, preferring rows with valid numeric price and common name
         seen_pairs: Dict[str, Dict[str, Any]] = {}
         
-        for row in metals_rows:
+        for row in all_rows:
             pair = str(row.get("pair") or "").strip()
             price = str(row.get("price") or "").strip()
             common_name = str(row.get("common_name") or "").strip()
             change_text = str(row.get("change_text") or "").strip()
+            group = str(row.get("group") or "").strip().lower()
             
             if not pair or not price:
                 continue
@@ -672,7 +683,12 @@ class SiteObserver:
             has_valid_price = bool(re.match(r"[+-]?\d+(?:\.\d+)?", price))
             has_name = len(common_name) > 0
             has_change = bool(re.search(r"[+-]?\d+", change_text))
-            quality_score = sum([has_valid_price, has_name, has_change])
+            
+            # Group bonus: prefer rows from identified groups over fallback "TableX" or "Commodities"
+            is_generic_group = "table" in group or "commodities" in group
+            group_bonus = 2 if not is_generic_group else 0
+            
+            quality_score = sum([has_valid_price, has_name, has_change]) + group_bonus
             
             # Extract numeric change percentage
             change = None
@@ -721,7 +737,8 @@ class SiteObserver:
                 raise RuntimeError("Observer not started. Call startup() first.")
 
             if self._needs_context_reset():
-                await self._reset_context()
+                # Shield reset from cancellation to ensure it finishes once started
+                await asyncio.shield(self._reset_context())
 
             # Lightweight self-heal in case the tab gets redirected to consent page between cycles.
             try:
