@@ -13,3 +13,16 @@ class HistoricalPriceResponse(BaseModel):
 class HistoricalQueryResponse(BaseModel):
     count: int
     items: list[HistoricalPriceResponse]
+
+
+class StreamMetricItem(BaseModel):
+    observed_at: datetime
+    ws_subscriber_count: int
+    queue_subscriber_count: int
+    snapshot_failure_count: int
+    stream_status: str
+
+
+class StreamMetricsResponse(BaseModel):
+    count: int
+    items: list[StreamMetricItem]

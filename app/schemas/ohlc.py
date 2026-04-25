@@ -25,3 +25,22 @@ class OHLCResponse(BaseModel):
     end: Optional[datetime]
     count: int
     candles: List[OHLCCandle]
+
+
+class FormingCandle(OHLCCandle):
+    """OHLC candle that is still forming."""
+    is_forming: bool = True
+    progress_percent: Optional[float] = None
+    time_remaining_seconds: Optional[float] = None
+
+
+class OHLCWithFormingResponse(BaseModel):
+    """Response for OHLC endpoint with forming candle."""
+    pair: str
+    interval: str
+    start: Optional[datetime]
+    end: Optional[datetime]
+    closed_candles_count: int
+    has_forming_candle: bool
+    last_update: datetime
+    candles: List[OHLCCandle]  # Can contain both closed and forming candles

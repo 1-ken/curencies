@@ -1,5 +1,5 @@
 """Alert-related Pydantic schemas."""
-from typing import Optional
+from typing import List, Optional
 from pydantic import BaseModel, EmailStr
 
 
@@ -108,3 +108,23 @@ class AlertResponse(BaseModel):
             }
         }
     }
+
+
+class AlertListResponse(BaseModel):
+    """Response model for listing alerts."""
+    total: int
+    active: List[AlertResponse]
+    triggered: List[AlertResponse]
+    all: List[AlertResponse]
+
+
+class CreateUpdateAlertResponse(BaseModel):
+    """Response model for creating or updating an alert."""
+    success: bool
+    alert: AlertResponse
+
+
+class DeleteAlertResponse(BaseModel):
+    """Response model for deleting an alert."""
+    success: bool
+    message: str

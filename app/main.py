@@ -18,6 +18,7 @@ from app.services.redis_service import RedisService
 from app.api.v1 import api as api_v1
 from app.api.v1.endpoints import alerts as alerts_endpoints
 from app.api.v1.endpoints import data as data_endpoints
+from app.schemas.responses import HealthResponse, PingResponse
 
 # Load environment variables from .env file
 load_dotenv()
@@ -267,7 +268,7 @@ async def on_shutdown():
 
 _app_start_time: float = time.monotonic()
 
-@app.get("/health", tags=["monitoring"])
+@app.get("/health", tags=["monitoring"], response_model=HealthResponse)
 async def health_check():
     """Comprehensive liveness probe.
 
@@ -353,7 +354,7 @@ async def health_check():
     )
 
 
-@app.get("/ping", tags=["monitoring"])
+@app.get("/ping", tags=["monitoring"], response_model=PingResponse)
 async def ping():
     """Minimal TCP-level liveness probe — always returns 200 if the process is alive."""
     return JSONResponse({"pong": True})

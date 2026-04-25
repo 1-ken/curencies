@@ -9,7 +9,10 @@ from app.schemas.alert import (
     UpdateAlertRequest,
     CreateCandleAlertRequest,
     UpdateCandleAlertRequest,
-    AlertResponse
+    AlertResponse,
+    AlertListResponse,
+    CreateUpdateAlertResponse,
+    DeleteAlertResponse
 )
 from app.services.alert_service import AlertManager
 
@@ -31,7 +34,7 @@ def set_alert_manager(manager: AlertManager):
     alert_manager = manager
 
 
-@router.post("", response_model=dict)
+@router.post("", response_model=CreateUpdateAlertResponse)
 async def create_alert(request: Union[CreateAlertRequest, CreateCandleAlertRequest]):
     """Create a new alert (price-based or candle-close).
     
@@ -113,7 +116,7 @@ async def create_alert(request: Union[CreateAlertRequest, CreateCandleAlertReque
         return {"success": True, "alert": alert.to_dict()}
 
 
-@router.get("", response_model=dict)
+@router.get("", response_model=AlertListResponse)
 async def get_alerts():
     """Get all alerts."""
     all_alerts = alert_manager.get_all_alerts()
@@ -125,7 +128,7 @@ async def get_alerts():
     }
 
 
-@router.get("/{alert_id}", response_model=dict)
+@router.get("/{alert_id}", response_model=AlertResponse)
 async def get_alert(alert_id: str):
     """Get specific alert."""
     alert = alert_manager.get_alert(alert_id)
@@ -134,7 +137,7 @@ async def get_alert(alert_id: str):
     return alert.to_dict()
 
 
-@router.delete("/{alert_id}", response_model=dict)
+@router.delete("/{alert_id}", response_model=DeleteAlertResponse)
 async def delete_alert(alert_id: str):
     """Delete an alert."""
     if alert_manager.delete_alert(alert_id):
@@ -142,7 +145,7 @@ async def delete_alert(alert_id: str):
     raise HTTPException(status_code=404, detail="Alert not found")
 
 
-@router.put("/{alert_id}", response_model=dict)
+@router.put("/{alert_id}", response_model=CreateUpdateAlertResponse)
 async def update_alert(alert_id: str, request: Union[UpdateAlertRequest, UpdateCandleAlertRequest]):
     """Update an existing alert (price-based or candle-close).
     

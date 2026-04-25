@@ -14,6 +14,9 @@ from app.services.alert_service import AlertManager
 from app.services.redis_service import RedisService
 from app.services.postgres_service import PostgresService
 from app.utils.forex_market_hours import is_forex_market_open, get_time_until_market_opens
+from app.schemas.responses import SnapshotResponse, ClientConfigResponse, StreamHealthResponse
+from app.schemas.history import HistoricalQueryResponse, StreamMetricsResponse
+from app.schemas.ohlc import OHLCResponse, OHLCWithFormingResponse
 
 logger = logging.getLogger(__name__)
 
@@ -255,7 +258,7 @@ def set_runtime_tuning(
     MAX_SNAPSHOT_FAILURES = max(1, int(max_snapshot_failures))
 
 
-@router.get("/snapshot")
+@router.get("/snapshot", response_model=SnapshotResponse)
 async def snapshot():
     """Get a single snapshot of current forex data.
     
@@ -323,7 +326,7 @@ async def snapshot():
         return JSONResponse({"error": "Failed to get snapshot"}, status_code=500)
 
 
-@router.get("/client-config")
+@router.get("/client-config", response_model=ClientConfigResponse)
 async def client_config():
     """Serve client runtime configuration derived from environment.
     Allows overriding WebSocket URL when running behind proxies or differing hosts.
@@ -334,7 +337,7 @@ async def client_config():
     })
 
 
-@router.get("/stream-health")
+@router.get("/stream-health", response_model=StreamHealthResponse)
 async def stream_health():
     """Expose stream freshness and resilience counters."""
     last_snapshot_age_seconds = None
@@ -1115,7 +1118,7 @@ async def retention_cleanup_task():
             await asyncio.sleep(RETENTION_CHECK_INTERVAL_SECONDS)
 
 
-@router.get("/historical")
+@router.get("/historical", response_model=HistoricalQueryResponse)
 async def historical_data(
     pair: Optional[str] = None,
     start: Optional[str] = None,
@@ -1155,7 +1158,7 @@ async def historical_data(
     return JSONResponse({"count": len(items), "items": items})
 
 
-@router.get("/historical/ohlc")
+@router.get("/historical/ohlc", response_model=OHLCResponse)
 async def historical_ohlc(
     pair: str,
     interval: str = "5m",
@@ -1231,7 +1234,7 @@ async def historical_ohlc(
         return JSONResponse({"error": "Failed to query OHLC data"}, status_code=500)
 
 
-@router.get("/historical/stream-metrics")
+@router.get("/historical/stream-metrics", response_model=StreamMetricsResponse)
 async def historical_stream_metrics(
     start: Optional[str] = None,
     end: Optional[str] = None,
@@ -1272,7 +1275,7 @@ async def historical_stream_metrics(
     return JSONResponse({"count": len(items), "items": items})
 
 
-@router.get("/historical/ohlc-with-forming")
+@router.get("/historical/ohlc-with-forming", response_model=OHLCWithFormingResponse)
 async def historical_ohlc_with_forming(
     pair: str,
     interval: str = "5m",
