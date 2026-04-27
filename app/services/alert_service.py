@@ -3,7 +3,6 @@ Alert management system for price notifications.
 """
 import json
 import logging
-import time
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, asdict
@@ -92,8 +91,11 @@ class AlertManager:
     def _parse_iso_utc(value: Optional[str]) -> Optional[datetime]:
         if not value:
             return None
+        normalized = str(value).strip()
+        if normalized.endswith("Z"):
+            normalized = normalized[:-1] + "+00:00"
         try:
-            parsed = datetime.fromisoformat(str(value))
+            parsed = datetime.fromisoformat(normalized)
         except (TypeError, ValueError):
             return None
         if parsed.tzinfo is None:
@@ -277,14 +279,26 @@ class AlertManager:
         """
         triggered = []
         
-        # Create price lookup - remove commas from price strings first
-        # Normalize pair names: remove slashes, convert to uppercase
+        # Create price lookup - handle numeric or string prices safely
         prices = {}
         for item in pairs_data:
-            normalized_pair = self._normalize_pair(item["pair"])
-            prices[normalized_pair] = float(item["price"].replace(",", ""))
+            pair_raw = item.get("pair")
+            price_raw = item.get("price")
+            if not pair_raw or price_raw is None:
+                continue
+                
+            try:
+                normalized_pair = self._normalize_pair(pair_raw)
+                # Remove commas from price strings before conversion
+                price_str = str(price_raw).replace(",", "")
+                prices[normalized_pair] = float(price_str)
+            except (ValueError, TypeError):
+                logger.debug(f"Skipping invalid price data for {pair_raw}: {price_raw}")
+                continue
+
+        active_alerts = self.get_active_alerts()
         
-        for alert in self.get_active_alerts():
+        for alert in active_alerts:
             normalized_alert_pair = self._normalize_pair(alert.pair)
             
             if normalized_alert_pair not in prices:
@@ -319,20 +333,33 @@ class AlertManager:
 
     @staticmethod
     def _normalize_pair(pair: str) -> str:
-        """Normalize pair name: remove slashes, strip commodity suffixes, convert to uppercase.
+        """Normalize pair name to a canonical symbol key.
         
         Handles both currency pairs and commodity pairs:
-        - Currency: 'EUR/USD' -> 'EURUSD', 'eurusd' -> 'EURUSD'
+        - Currency: 'EUR/USD' -> 'EURUSD', 'EURUSD' -> 'EURUSD'
         - Commodity: 'XAUUSD:CUR' -> 'XAUUSD', 'HG1:COM' -> 'HG1'
         
-        This allows commodity alerts (created with :CUR/:COM suffix) to match 
-        incoming data (which comes from TradingEconomics without suffix).
+        This aligns with PostgresService normalization and ensures consistency
+        across the system and diagnostic tools.
         """
-        normalized = pair.replace("/", "").upper()
-        # Strip commodity suffixes (:CUR, :COM, etc.) for commodity pair matching
-        if ":" in normalized:
-            normalized = normalized.split(":")[0]
-        return normalized
+        if not pair:
+            return ""
+        
+        # 1. Strip whitespace and convert to uppercase
+        pair = str(pair).strip().upper()
+
+        # 2. Remove provider/exchange suffixes like :CUR, :COM, :IDX
+        if ":" in pair:
+            pair = pair.split(":", 1)[0]
+        
+        # 3. For currency pairs (6 chars when slash removed), remove the slash
+        compact = pair.replace("/", "")
+        if len(compact) == 6 and compact.isalpha():
+            return compact
+            
+        # 4. For commodities and others, return canonical uppercase base symbol
+        return pair
+
     def check_candle_alerts(self, ohlc_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Check candle-close threshold alerts against latest closed candles.
@@ -354,12 +381,14 @@ class AlertManager:
             # Keep the most recent (first in returned list if query sorts DESC then ASC)
             if key not in candle_lookup:
                 candle_lookup[key] = candle
-        
+
+        active_candle_alerts = [
+            alert for alert in self.get_active_alerts()
+            if alert.alert_type == "candle_close"
+        ]
+    
         # Check all active candle-close alerts
-        for alert in self.get_active_alerts():
-            if alert.alert_type != "candle_close":
-                continue
-            
+        for alert in active_candle_alerts:
             normalized_alert_interval = self._normalize_interval(alert.interval)
             key = (self._normalize_pair(alert.pair), normalized_alert_interval)
             if key not in candle_lookup:
