@@ -10,6 +10,11 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from app.models import Base, HistoricalPrice, StreamMetric
+from app.utils.pair_normalizer import (
+    PROVIDER_SUFFIXES,
+    canonical_pair,
+    pair_variants as _shared_pair_variants,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +78,47 @@ class PostgresService:
                 )
                 logger.info("Dropped legacy historical_prices.source_title column")
         logger.info("PostgreSQL schema ensured")
+
+    async def migrate_legacy_pair_suffixes(self) -> Dict[str, int]:
+        """One-shot rewrite of provider-tagged ``pair`` values in ``historical_prices``.
+
+        Historically rows were inserted with spellings like ``XAUUSD:CUR`` /
+        ``HG1:COM``. The observer now writes canonical ``XAUUSD`` / ``HG1``
+        instead. This migration aligns older rows with that convention so
+        future queries only need to match a single spelling.
+
+        Runs at startup; idempotent. Returns a ``{suffix: rows_updated}`` map
+        for logging.
+        """
+        if not self._sessionmaker:
+            raise RuntimeError("PostgreSQL session not initialized")
+
+        updated_by_suffix: Dict[str, int] = {}
+        total = 0
+        async with self._sessionmaker() as session:
+            for suffix in PROVIDER_SUFFIXES:
+                result = await session.execute(
+                    text(
+                        "UPDATE historical_prices "
+                        "SET pair = SPLIT_PART(pair, ':', 1) "
+                        "WHERE pair LIKE :pattern"
+                    ),
+                    {"pattern": f"%:{suffix}"},
+                )
+                count = max(0, int(result.rowcount or 0))
+                updated_by_suffix[suffix] = count
+                total += count
+            await session.commit()
+
+        if total:
+            logger.info(
+                "Migrated %d legacy suffixed historical_prices row(s): %s",
+                total,
+                updated_by_suffix,
+            )
+        else:
+            logger.debug("No legacy suffixed historical_prices rows to migrate")
+        return updated_by_suffix
 
     async def insert_snapshots(self, snapshots: Iterable[Dict[str, Any]]) -> int:
         if not self._sessionmaker:
@@ -242,11 +288,8 @@ class PostgresService:
             raise ValueError(f"Invalid interval: {interval}. Must be one of {list(interval_map.keys())}")
         
         interval_seconds = interval_map[interval]
-        
+
         pair_variants = self._pair_variants(pair)
-        pair_0 = pair_variants[0]
-        pair_1 = pair_variants[1] if len(pair_variants) > 1 else pair_0
-        pair_2 = pair_variants[2] if len(pair_variants) > 2 else pair_0
 
         # Build SQL query for OHLC aggregation using epoch-based bucketing
         # This correctly handles multi-minute intervals like 5m, 15m, 30m
@@ -260,7 +303,7 @@ class PostgresService:
                     (ARRAY_AGG(price ORDER BY observed_at DESC))[1] AS close,
                     COUNT(*) AS volume
                 FROM historical_prices
-                WHERE (pair = :pair_0 OR pair = :pair_1 OR pair = :pair_2)
+                WHERE pair = ANY(:pairs)
                     AND (CAST(:start AS TIMESTAMP) IS NULL OR observed_at >= CAST(:start AS TIMESTAMP))
                     AND (CAST(:end AS TIMESTAMP) IS NULL OR observed_at <= CAST(:end AS TIMESTAMP))
                 GROUP BY bucket
@@ -269,11 +312,9 @@ class PostgresService:
             )
             SELECT * FROM candles ORDER BY bucket ASC
         """)
-        
+
         params = {
-            "pair_0": pair_0,
-            "pair_1": pair_1,
-            "pair_2": pair_2,
+            "pairs": pair_variants,
             "interval_seconds": interval_seconds,
             "start": start,
             "end": end,
@@ -331,11 +372,8 @@ class PostgresService:
             raise ValueError(f"Invalid interval: {interval}. Must be one of {list(interval_map.keys())}")
         
         interval_seconds = interval_map[interval]
-        
+
         pair_variants = self._pair_variants(pair)
-        pair_0 = pair_variants[0]
-        pair_1 = pair_variants[1] if len(pair_variants) > 1 else pair_0
-        pair_2 = pair_variants[2] if len(pair_variants) > 2 else pair_0
 
         # Query: Get the candle that is fully closed (before the current bucket)
         # Compare bucket numbers directly to avoid edge cases with timestamp reconstruction
@@ -348,17 +386,15 @@ class PostgresService:
                 (ARRAY_AGG(price ORDER BY observed_at DESC))[1] AS close,
                 COUNT(*) AS volume
             FROM historical_prices
-            WHERE (pair = :pair_0 OR pair = :pair_1 OR pair = :pair_2)
+            WHERE pair = ANY(:pairs)
                 AND (EXTRACT(EPOCH FROM observed_at)::bigint / :interval_seconds) < (EXTRACT(EPOCH FROM NOW())::bigint / :interval_seconds)
             GROUP BY bucket
             ORDER BY bucket DESC
             LIMIT 1
         """)
-        
+
         params = {
-            "pair_0": pair_0,
-            "pair_1": pair_1,
-            "pair_2": pair_2,
+            "pairs": pair_variants,
             "interval_seconds": interval_seconds,
         }
         
@@ -428,32 +464,26 @@ class PostgresService:
 
     @staticmethod
     def _normalize_pair(value: Optional[str]) -> Optional[str]:
-        if not value:
-            return None
-        pair = str(value).strip()
-        if not pair:
-            return None
+        """Canonicalize an incoming pair name for storage and querying.
 
-        compact = pair.upper().replace("/", "")
-        if len(compact) == 6 and compact.isalpha():
-            return compact
-        return pair
+        Thin delegator to :func:`app.utils.pair_normalizer.canonical_pair`.
+        Returns ``None`` for empty input for backwards compatibility with
+        existing callers that distinguish missing values from the empty string.
+        """
+        canonical = canonical_pair(value)
+        return canonical or None
 
     @classmethod
     def _pair_variants(cls, value: Optional[str]) -> List[str]:
-        normalized = cls._normalize_pair(value)
-        if not normalized:
-            return []
+        """Return all equivalent pair spellings for a query.
 
-        variants = [normalized]
-        compact = normalized.upper().replace("/", "")
-        if len(compact) == 6 and compact.isalpha():
-            slash_pair = f"{compact[:3]}/{compact[3:]}"
-            if slash_pair not in variants:
-                variants.append(slash_pair)
-            if compact not in variants:
-                variants.append(compact)
-        return variants
+        Includes slash / no-slash forex variants. Historical rows with the
+        ``:CUR`` / ``:COM`` / ``:IND`` suffix are migrated to canonical form
+        at startup via :meth:`migrate_legacy_pair_suffixes`, so those spellings
+        are retained in the variant list only as a safety net for rows the
+        migration may have missed (e.g. inserted concurrently).
+        """
+        return _shared_pair_variants(value)
 
     async def _ensure_database_exists(self) -> None:
         url = make_url(self.dsn)

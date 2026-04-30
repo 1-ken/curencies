@@ -8,6 +8,8 @@ from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, asdict
 import uuid
 
+from app.utils.pair_normalizer import canonical_pair
+
 logger = logging.getLogger(__name__)
 
 ALERTS_FILE = "alerts.json"
@@ -59,20 +61,45 @@ class AlertManager:
         self._load_alerts()
 
     def _load_alerts(self) -> None:
-        """Load alerts from file."""
+        """Load alerts from file and migrate legacy pair spellings.
+
+        Historically ``alerts.json`` has contained non-canonical pair forms
+        ("xauusd", "XAGUSDCUR", "EUR/USD"). On load we canonicalize them via
+        :func:`canonical_pair` and persist back if anything changed, so the
+        file converges to a single clean representation over time.
+        """
         try:
             with open(self.file_path, "r") as f:
                 data = json.load(f)
-                self.alerts = {}
-                for alert_id, alert_data in data.items():
-                    alert_obj = Alert.from_dict(alert_data)
-                    if alert_obj.alert_type == "candle_close":
-                        alert_obj.interval = self._normalize_interval(alert_obj.interval)
-                    self.alerts[alert_id] = alert_obj
-            logger.info(f"Loaded {len(self.alerts)} alerts")
         except FileNotFoundError:
             logger.info("No existing alerts file, starting fresh")
             self.alerts = {}
+            return
+
+        self.alerts = {}
+        migrated_count = 0
+        for alert_id, alert_data in data.items():
+            alert_obj = Alert.from_dict(alert_data)
+            if alert_obj.alert_type == "candle_close":
+                alert_obj.interval = self._normalize_interval(alert_obj.interval)
+
+            canonical = canonical_pair(alert_obj.pair)
+            if canonical and canonical != alert_obj.pair:
+                logger.info(
+                    "Migrating alert %s pair '%s' -> canonical '%s'",
+                    alert_obj.id,
+                    alert_obj.pair,
+                    canonical,
+                )
+                alert_obj.pair = canonical
+                migrated_count += 1
+
+            self.alerts[alert_id] = alert_obj
+
+        if migrated_count:
+            logger.info("Persisting %d migrated alert(s) back to %s", migrated_count, self.file_path)
+            self._save_alerts()
+        logger.info("Loaded %d alerts", len(self.alerts))
 
     def _save_alerts(self) -> None:
         """Save alerts to file."""
@@ -131,11 +158,17 @@ class AlertManager:
         phone: str = "",
         custom_message: str = "",
     ) -> Alert:
-        """Create a new legacy price alert (alert_type='price')."""
+        """Create a new legacy price alert (alert_type='price').
+
+        The stored pair is always canonicalized via :func:`canonical_pair` so
+        the alert matches observer output regardless of the form the caller
+        used (``EUR/USD``, ``XAUUSD:CUR``, ``XAUUSDCUR`` etc.).
+        """
+        canonical = canonical_pair(pair) or str(pair).strip()
         alert_id = str(uuid.uuid4())
         alert = Alert(
             id=alert_id,
-            pair=pair,
+            pair=canonical,
             alert_type="price",
             target_price=target_price,
             condition=condition,
@@ -148,7 +181,7 @@ class AlertManager:
         )
         self.alerts[alert_id] = alert
         self._save_alerts()
-        logger.info(f"Created price alert {alert_id} for {pair} at {target_price}")
+        logger.info(f"Created price alert {alert_id} for {canonical} at {target_price}")
         return alert
 
     def create_candle_alert(
@@ -162,15 +195,19 @@ class AlertManager:
         phone: str = "",
         custom_message: str = "",
     ) -> Alert:
-        """Create a new candle-close threshold alert (alert_type='candle_close')."""
+        """Create a new candle-close threshold alert (alert_type='candle_close').
+
+        The stored pair is canonicalized via :func:`canonical_pair`.
+        """
         normalized_interval = self._normalize_interval(interval)
         if self._interval_seconds(normalized_interval) is None:
             raise ValueError("Invalid interval. Must be one of: 1m, 5m, 15m, 30m, 1h, 4h, 1d")
 
+        canonical = canonical_pair(pair) or str(pair).strip()
         alert_id = str(uuid.uuid4())
         alert = Alert(
             id=alert_id,
-            pair=pair,
+            pair=canonical,
             alert_type="candle_close",
             interval=normalized_interval,
             direction=direction,
@@ -185,7 +222,7 @@ class AlertManager:
         )
         self.alerts[alert_id] = alert
         self._save_alerts()
-        logger.info(f"Created candle-close alert {alert_id} for {pair} {normalized_interval} {direction} {threshold}")
+        logger.info(f"Created candle-close alert {alert_id} for {canonical} {normalized_interval} {direction} {threshold}")
         return alert
 
     def get_alert(self, alert_id: str) -> Optional[Alert]:
@@ -333,32 +370,12 @@ class AlertManager:
 
     @staticmethod
     def _normalize_pair(pair: str) -> str:
-        """Normalize pair name to a canonical symbol key.
-        
-        Handles both currency pairs and commodity pairs:
-        - Currency: 'EUR/USD' -> 'EURUSD', 'EURUSD' -> 'EURUSD'
-        - Commodity: 'XAUUSD:CUR' -> 'XAUUSD', 'HG1:COM' -> 'HG1'
-        
-        This aligns with PostgresService normalization and ensures consistency
-        across the system and diagnostic tools.
-        """
-        if not pair:
-            return ""
-        
-        # 1. Strip whitespace and convert to uppercase
-        pair = str(pair).strip().upper()
+        """Normalize pair name to the canonical symbol key.
 
-        # 2. Remove provider/exchange suffixes like :CUR, :COM, :IDX
-        if ":" in pair:
-            pair = pair.split(":", 1)[0]
-        
-        # 3. For currency pairs (6 chars when slash removed), remove the slash
-        compact = pair.replace("/", "")
-        if len(compact) == 6 and compact.isalpha():
-            return compact
-            
-        # 4. For commodities and others, return canonical uppercase base symbol
-        return pair
+        Thin delegator to :func:`app.utils.pair_normalizer.canonical_pair` so
+        observer, alerts, and Postgres all agree on a single spelling.
+        """
+        return canonical_pair(pair)
 
     def check_candle_alerts(self, ohlc_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """

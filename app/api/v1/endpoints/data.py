@@ -14,6 +14,7 @@ from app.services.alert_service import AlertManager
 from app.services.redis_service import RedisService
 from app.services.postgres_service import PostgresService
 from app.utils.forex_market_hours import is_forex_market_open, get_time_until_market_opens
+from app.utils.pair_normalizer import canonical_pair
 from app.schemas.responses import SnapshotResponse, ClientConfigResponse, StreamHealthResponse
 from app.schemas.history import HistoricalQueryResponse, StreamMetricsResponse
 from app.schemas.ohlc import OHLCResponse, OHLCWithFormingResponse
@@ -541,9 +542,8 @@ def _attach_alerts(data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _normalize_pair_symbol(value: Optional[str]) -> str:
-    if not value:
-        return ""
-    return str(value).upper().replace("/", "").strip()
+    """Canonicalize pair symbols passed via WS query params."""
+    return canonical_pair(value)
 
 
 def _interval_to_seconds(interval: str) -> int:
@@ -962,9 +962,15 @@ async def alert_monitoring_task():
                         ]
                         
                         if candle_alerts:
-                            # Fetch latest closed candles for all alerts
+                            # Stored alert pairs are already canonicalized
+                            # on create / load, but we canonicalize here
+                            # again defensively so any externally-injected
+                            # alerts still resolve correctly.
                             candle_data = await postgres_service.get_latest_closed_candles_for_alerts([
-                                {"pair": a.pair, "interval": a.interval}
+                                {
+                                    "pair": canonical_pair(a.pair),
+                                    "interval": a.interval,
+                                }
                                 for a in candle_alerts
                             ])
                             

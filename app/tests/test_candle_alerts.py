@@ -219,6 +219,40 @@ class TestCandleAlertEvaluation:
         triggered = manager.check_candle_alerts(candle_data)
         
         assert len(triggered) == 0
+
+    def test_check_candle_alerts_accepts_z_timestamp_string(self, tmp_path):
+        """Test candle timestamp parsing for ISO strings ending in 'Z'."""
+        alert_file = tmp_path / "alerts.json"
+        manager = AlertManager(str(alert_file))
+
+        alert = manager.create_candle_alert(
+            pair="XAUUSD",
+            interval="15m",
+            direction="above",
+            threshold=3000.0,
+            email="test@example.com",
+            channel="email",
+        )
+
+        candle_ts = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        candle_data = [
+            {
+                "pair": "XAUUSD:CUR",
+                "interval": "15m",
+                "timestamp": candle_ts,
+                "open": 2999.0,
+                "high": 3011.0,
+                "low": 2998.0,
+                "close": 3005.0,
+                "volume": 100,
+            }
+        ]
+
+        triggered = manager.check_candle_alerts(candle_data)
+
+        assert len(triggered) == 1
+        assert triggered[0]["alert"]["id"] == alert.id
+        assert triggered[0]["close_price"] == 3005.0
     
     def test_check_candle_alerts_skips_if_candle_already_evaluated(self, tmp_path):
         """Test that candle alert doesn't trigger twice for same candle."""
@@ -550,6 +584,263 @@ class TestCandleAlertNormalization:
         
         # Should match despite different pair formats
         assert len(triggered) == 1
+
+    def test_normalize_pair_strips_commodity_suffixes(self, tmp_path):
+        """Commodity suffixes like :CUR/:COM should normalize to base symbol."""
+        alert_file = tmp_path / "alerts.json"
+        manager = AlertManager(str(alert_file))
+
+        assert manager._normalize_pair("xauusd:cur") == "XAUUSD"
+        assert manager._normalize_pair("CL1:COM") == "CL1"
+
+    def test_normalize_pair_strips_legacy_concatenated_suffixes(self, tmp_path):
+        """Legacy alerts stored concatenated names like XAUUSDCUR (no colon);
+        these must normalize to the same canonical base symbol as ``XAUUSD:CUR``.
+        """
+        alert_file = tmp_path / "alerts.json"
+        manager = AlertManager(str(alert_file))
+
+        assert manager._normalize_pair("XAUUSDCUR") == "XAUUSD"
+        assert manager._normalize_pair("XAGUSDCUR") == "XAGUSD"
+        assert manager._normalize_pair("xagusdcur") == "XAGUSD"
+        # Short non-forex bases like CL1/HG1 are NOT stripped.
+        assert manager._normalize_pair("CL1") == "CL1"
+        assert manager._normalize_pair("HG1") == "HG1"
+
+    def test_normalize_pair_keeps_forex_compatibility(self, tmp_path):
+        """Forex symbols should still normalize slash/no-slash variants."""
+        alert_file = tmp_path / "alerts.json"
+        manager = AlertManager(str(alert_file))
+
+        assert manager._normalize_pair("eur/usd") == "EURUSD"
+        assert manager._normalize_pair("EURUSD") == "EURUSD"
+
+    def test_price_alert_matches_legacy_concatenated_commodity(self, tmp_path):
+        """An alert stored as ``XAGUSDCUR`` must trigger against a normalized
+        snapshot emitting ``XAGUSD``.
+        """
+        alert_file = tmp_path / "alerts.json"
+        manager = AlertManager(str(alert_file))
+
+        alert = manager.create_alert(
+            pair="XAGUSDCUR",
+            target_price=75.0,
+            condition="below",
+            channel="sms",
+            phone="+1234567890",
+        )
+
+        pairs_data = [
+            {"pair": "XAGUSD", "price": "72.603"},
+            {"pair": "XAUUSD", "price": "4570.82"},
+        ]
+
+        triggered = manager.check_alerts(pairs_data)
+
+        assert len(triggered) == 1
+        assert triggered[0]["alert"]["id"] == alert.id
+        assert triggered[0]["current_price"] == 72.603
+
+    def test_candle_alert_matches_legacy_concatenated_commodity(self, tmp_path):
+        """Candle-close alerts stored as ``XAUUSDCUR`` must trigger against
+        candle data emitted with the canonical ``XAUUSD`` symbol.
+        """
+        alert_file = tmp_path / "alerts.json"
+        manager = AlertManager(str(alert_file))
+
+        alert = manager.create_candle_alert(
+            pair="XAUUSDCUR",
+            interval="1m",
+            direction="below",
+            threshold=4700.0,
+            channel="sms",
+            phone="+1234567890",
+        )
+
+        created_at = datetime.fromisoformat(alert.created_at)
+        if created_at.tzinfo is None:
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        # Use a candle that closed strictly after alert creation.
+        candle_start = created_at - timedelta(minutes=1) + timedelta(seconds=1)
+
+        candle_data = [
+            {
+                "pair": "XAUUSD",
+                "interval": "1m",
+                "timestamp": candle_start,
+                "open": 4720.0,
+                "high": 4725.0,
+                "low": 4680.0,
+                "close": 4690.0,
+                "volume": 60,
+            }
+        ]
+
+        triggered = manager.check_candle_alerts(candle_data)
+
+        assert len(triggered) == 1
+        assert triggered[0]["alert"]["id"] == alert.id
+        assert triggered[0]["close_price"] == 4690.0
+
+    def test_price_alert_matches_snapshot_symbol_with_suffix(self, tmp_path):
+        """Price alerts should match snapshot pairs that carry provider suffixes."""
+        alert_file = tmp_path / "alerts.json"
+        manager = AlertManager(str(alert_file))
+
+        alert = manager.create_alert(
+            pair="xauusd",
+            target_price=1.0,
+            condition="above",
+            email="test@example.com",
+            channel="email",
+        )
+
+        pairs_data = [
+            {"pair": "XAUUSD:CUR", "price": "4000.0"},
+            {"pair": "CL1:COM", "price": "79.5"},
+        ]
+
+        triggered = manager.check_alerts(pairs_data)
+
+        assert len(triggered) == 1
+        assert triggered[0]["alert"]["id"] == alert.id
+        assert triggered[0]["current_price"] == 4000.0
+
+
+class TestAlertCanonicalization:
+    """Alert creation and load should produce canonical pair spellings."""
+
+    def test_create_alert_canonicalizes_pair_on_write(self, tmp_path):
+        alert_file = tmp_path / "alerts.json"
+        manager = AlertManager(str(alert_file))
+
+        alert = manager.create_alert(
+            pair="EUR/USD",
+            target_price=1.10,
+            condition="above",
+            email="test@example.com",
+            channel="email",
+        )
+        assert alert.pair == "EURUSD"
+
+        # Also for commodity legacy spellings.
+        commodity_alert = manager.create_alert(
+            pair="XAUUSDCUR",
+            target_price=3000.0,
+            condition="above",
+            channel="sms",
+            phone="+1234567890",
+        )
+        assert commodity_alert.pair == "XAUUSD"
+
+    def test_create_candle_alert_canonicalizes_pair_on_write(self, tmp_path):
+        alert_file = tmp_path / "alerts.json"
+        manager = AlertManager(str(alert_file))
+
+        alert = manager.create_candle_alert(
+            pair="xauusd:cur",
+            interval="15m",
+            direction="above",
+            threshold=3000.0,
+            channel="sms",
+            phone="+1234567890",
+        )
+        assert alert.pair == "XAUUSD"
+
+    def test_load_alerts_migrates_noncanonical_pairs(self, tmp_path):
+        """Loading an ``alerts.json`` with legacy spellings migrates them in-place."""
+        import json
+
+        alert_file = tmp_path / "alerts.json"
+        legacy_data = {
+            "a1": {
+                "id": "a1",
+                "pair": "xauusd",                # lowercase forex-style metal
+                "status": "active",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "alert_type": "price",
+                "channel": "sms",
+                "phone": "+1",
+                "target_price": 3000.0,
+                "condition": "above",
+            },
+            "a2": {
+                "id": "a2",
+                "pair": "XAGUSDCUR",             # legacy concatenated form
+                "status": "active",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "alert_type": "candle_close",
+                "channel": "sms",
+                "phone": "+1",
+                "interval": "15m",
+                "direction": "below",
+                "threshold": 75.0,
+            },
+            "a3": {
+                "id": "a3",
+                "pair": "EUR/USD",               # slash form
+                "status": "triggered",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "alert_type": "price",
+                "channel": "email",
+                "email": "test@example.com",
+                "target_price": 1.10,
+                "condition": "above",
+            },
+            "a4": {
+                "id": "a4",
+                "pair": "XAUUSD",                # already canonical - must not move
+                "status": "active",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "alert_type": "price",
+                "channel": "sms",
+                "phone": "+1",
+                "target_price": 3000.0,
+                "condition": "above",
+            },
+        }
+        alert_file.write_text(json.dumps(legacy_data))
+
+        manager = AlertManager(str(alert_file))
+
+        assert manager.alerts["a1"].pair == "XAUUSD"
+        assert manager.alerts["a2"].pair == "XAGUSD"
+        assert manager.alerts["a3"].pair == "EURUSD"
+        assert manager.alerts["a4"].pair == "XAUUSD"
+
+        # Persisted state should reflect the migration.
+        persisted = json.loads(alert_file.read_text())
+        assert persisted["a1"]["pair"] == "XAUUSD"
+        assert persisted["a2"]["pair"] == "XAGUSD"
+        assert persisted["a3"]["pair"] == "EURUSD"
+        assert persisted["a4"]["pair"] == "XAUUSD"
+
+    def test_load_alerts_skips_save_when_nothing_to_migrate(self, tmp_path):
+        """No unnecessary writes when alerts are already canonical."""
+        import json
+
+        alert_file = tmp_path / "alerts.json"
+        canonical_data = {
+            "a1": {
+                "id": "a1",
+                "pair": "XAUUSD",
+                "status": "active",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "alert_type": "price",
+                "channel": "sms",
+                "phone": "+1",
+                "target_price": 3000.0,
+                "condition": "above",
+            }
+        }
+        alert_file.write_text(json.dumps(canonical_data))
+        mtime_before = alert_file.stat().st_mtime_ns
+
+        AlertManager(str(alert_file))
+
+        mtime_after = alert_file.stat().st_mtime_ns
+        # File must not be rewritten when nothing needs migrating.
+        assert mtime_after == mtime_before
 
 
 class TestPersistenceAndRecovery:

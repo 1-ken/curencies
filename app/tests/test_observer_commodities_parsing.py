@@ -4,7 +4,7 @@ import unittest
 import re
 from typing import Any, Dict, List, Optional
 
-from app.services.observer_service import SiteObserver
+from app.services.observer_service import ALLOWED_COMMODITY_SYMBOLS, SiteObserver
 
 
 class _FakeLocator:
@@ -57,9 +57,10 @@ class TradingEconomicsCommodityParsingTests(unittest.TestCase):
         parsed = SiteObserver._normalize_tradingeconomics_commodities(rows)
 
         self.assertEqual(len(parsed), 2)
-        # Search for pairs to be order-independent
-        gold = next(r for r in parsed if r["pair"] == "XAUUSD:CUR")
-        copper = next(r for r in parsed if r["pair"] == "HG1:COM")
+        # Search for pairs to be order-independent. Provider suffixes like
+        # :CUR/:COM are stripped to the canonical base symbol.
+        gold = next(r for r in parsed if r["pair"] == "XAUUSD")
+        copper = next(r for r in parsed if r["pair"] == "HG1")
 
         self.assertEqual(gold["common_name"], "Gold")
         self.assertEqual(gold["price"], "4833.56")
@@ -69,8 +70,8 @@ class TradingEconomicsCommodityParsingTests(unittest.TestCase):
         self.assertEqual(copper["price"], "6.1035")
         self.assertEqual(copper["change"], "-0.61")
 
-    def test_includes_all_commodity_groups(self):
-        """Verify that all commodity groups (Metals, Energy, Agricultural) are returned."""
+    def test_filters_to_allowlist_and_strips_suffix(self):
+        """Only allowlisted commodities survive; suffixes are stripped."""
         rows = [
             {
                 "group": "Energy",
@@ -100,13 +101,22 @@ class TradingEconomicsCommodityParsingTests(unittest.TestCase):
                 "price": "6.1035",
                 "change_text": "-0.61%",
             },
+            {
+                "group": "Metals",
+                "pair": "XAGUSD:CUR",
+                "common_name": "Silver",
+                "price": "72.48",
+                "change_text": "1.17%",
+            },
         ]
 
         parsed = SiteObserver._normalize_tradingeconomics_commodities(rows)
 
-        self.assertEqual(len(parsed), 4)
         pairs = {row["pair"] for row in parsed}
-        self.assertEqual(pairs, {"CL1:COM", "XAUUSD:CUR", "S 1:COM", "HG1:COM"})
+        # Only the curated subset is emitted; Soybeans gets dropped.
+        self.assertEqual(pairs, {"CL1", "XAUUSD", "HG1", "XAGUSD"})
+        # All emitted pairs must be in the allowlist.
+        self.assertTrue(pairs.issubset(ALLOWED_COMMODITY_SYMBOLS))
 
     def test_deduplicates_by_pair_preferring_quality(self):
         """Verify that duplicate pairs are deduplicated, keeping higher quality row."""
@@ -131,8 +141,7 @@ class TradingEconomicsCommodityParsingTests(unittest.TestCase):
 
         # Should contain only one row (deduplicated)
         self.assertEqual(len(parsed), 1)
-        # In our new scoring, group bonus makes the second row higher quality
-        # But since they result in same normalized row, it's fine.
+        self.assertEqual(parsed[0]["pair"], "XAUUSD")
 
     def test_drops_incomplete_rows(self):
         rows = [
@@ -159,9 +168,9 @@ class TradingEconomicsCommodityParsingTests(unittest.TestCase):
         rows = [
             {
                 "group": "Metals",
-                "pair": "XPTUSD:CUR",
-                "common_name": "Platinum",
-                "price": "2141.70",
+                "pair": "XAGUSD:CUR",
+                "common_name": "Silver",
+                "price": "72.48",
                 "change_text": "", # Missing change
             },
         ]
@@ -169,10 +178,73 @@ class TradingEconomicsCommodityParsingTests(unittest.TestCase):
         parsed = SiteObserver._normalize_tradingeconomics_commodities(rows)
 
         self.assertEqual(len(parsed), 1)
-        self.assertEqual(parsed[0]["pair"], "XPTUSD:CUR")
-        self.assertEqual(parsed[0]["common_name"], "Platinum")
-        self.assertEqual(parsed[0]["price"], "2141.70")
+        self.assertEqual(parsed[0]["pair"], "XAGUSD")
+        self.assertEqual(parsed[0]["common_name"], "Silver")
+        self.assertEqual(parsed[0]["price"], "72.48")
         self.assertIsNone(parsed[0]["change"])
+
+    def test_strip_provider_suffix_helper(self):
+        """The suffix-strip helper handles colon, concatenated, and base forms."""
+        self.assertEqual(SiteObserver._strip_provider_suffix("XAUUSD:CUR"), "XAUUSD")
+        self.assertEqual(SiteObserver._strip_provider_suffix("HG1:COM"), "HG1")
+        self.assertEqual(SiteObserver._strip_provider_suffix("XAUUSDCUR"), "XAUUSD")
+        self.assertEqual(SiteObserver._strip_provider_suffix("XAGUSDCUR"), "XAGUSD")
+        # Already-canonical inputs pass through unchanged.
+        self.assertEqual(SiteObserver._strip_provider_suffix("CL1"), "CL1")
+        self.assertEqual(SiteObserver._strip_provider_suffix("HG1"), "HG1")
+        self.assertEqual(SiteObserver._strip_provider_suffix(""), "")
+
+    def test_custom_allowlist_expands_emitted_set(self):
+        """Passing an ``allowed_symbols`` override picks up extra commodities."""
+        rows = [
+            {
+                "group": "Metals",
+                "pair": "XAUUSD:CUR",
+                "common_name": "Gold",
+                "price": "4833.56",
+                "change_text": "0.94%",
+            },
+            {
+                "group": "Metals",
+                "pair": "XPTUSD:CUR",
+                "common_name": "Platinum",
+                "price": "2141.70",
+                "change_text": "0.50%",
+            },
+        ]
+
+        # Default allowlist drops Platinum.
+        default_parsed = SiteObserver._normalize_tradingeconomics_commodities(rows)
+        self.assertEqual({r["pair"] for r in default_parsed}, {"XAUUSD"})
+
+        # Custom allowlist — accepts colon-suffixed spellings and canonicalizes them.
+        custom_parsed = SiteObserver._normalize_tradingeconomics_commodities(
+            rows,
+            allowed_symbols=["XAUUSD", "xptusd:cur"],
+        )
+        self.assertEqual({r["pair"] for r in custom_parsed}, {"XAUUSD", "XPTUSD"})
+
+    def test_instance_level_allowlist_is_used(self):
+        """The observer instance propagates its allowlist into the filter."""
+        observer = SiteObserver(
+            url="https://example.com",
+            table_selector="table",
+            pair_cell_selector="td",
+            source_name="commodities",
+            allowed_commodity_symbols=["XPTUSD"],
+        )
+        # Allowlist should be canonicalized at construction time.
+        self.assertEqual(observer.allowed_commodity_symbols, frozenset({"XPTUSD"}))
+
+    def test_instance_allowlist_empty_falls_back_to_default(self):
+        observer = SiteObserver(
+            url="https://example.com",
+            table_selector="table",
+            pair_cell_selector="td",
+            source_name="commodities",
+            allowed_commodity_symbols=[],
+        )
+        self.assertEqual(observer.allowed_commodity_symbols, ALLOWED_COMMODITY_SYMBOLS)
 
     def test_blocked_page_heuristic_detects_real_indicators(self):
         blocked = SiteObserver._looks_like_blocked_page(

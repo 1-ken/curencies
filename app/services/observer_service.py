@@ -7,7 +7,7 @@ import logging
 import os
 import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 from playwright.async_api import (
     async_playwright,
@@ -17,7 +17,16 @@ from playwright.async_api import (
     TimeoutError as PlaywrightTimeoutError,
 )
 
+from app.utils.pair_normalizer import (
+    DEFAULT_ALLOWED_COMMODITY_SYMBOLS,
+    canonical_pair,
+    normalize_allowlist,
+)
+
 logger = logging.getLogger(__name__)
+
+# Re-export the default allowlist for backward compatibility with older imports.
+ALLOWED_COMMODITY_SYMBOLS = DEFAULT_ALLOWED_COMMODITY_SYMBOLS
 
 
 class SiteObserver:
@@ -30,6 +39,7 @@ class SiteObserver:
         inject_mutation_observer: bool = True,
         filter_by_majors: bool = True,
         source_name: str = "default",
+        allowed_commodity_symbols: Optional[Iterable[str]] = None,
     ) -> None:
         self.url = url
         self.table_selector = table_selector
@@ -38,6 +48,19 @@ class SiteObserver:
         self.inject_mutation_observer = inject_mutation_observer
         self.filter_by_majors = filter_by_majors
         self.source_name = source_name
+        # Canonical symbols the commodities observer is allowed to emit. We
+        # canonicalize the incoming iterable so the lookup inside
+        # ``_normalize_tradingeconomics_commodities`` always matches
+        # ``canonical_pair`` output, regardless of how the config spelled
+        # entries (``XAUUSD:CUR`` vs ``XAUUSD`` etc.).
+        self.allowed_commodity_symbols: frozenset[str] = normalize_allowlist(
+            allowed_commodity_symbols
+        )
+        # Observability: counters for the commodities filter. These are
+        # populated every snapshot cycle and logged once when they change so
+        # downstream operators can spot upstream format changes quickly.
+        self._last_raw_commodity_count: Optional[int] = None
+        self._last_kept_commodity_count: Optional[int] = None
 
         self._pw = None
         self.browser: Optional[Browser] = None
@@ -624,7 +647,42 @@ class SiteObserver:
             """,
         )
 
-        return self._normalize_tradingeconomics_commodities(raw_rows)
+        normalized = self._normalize_tradingeconomics_commodities(
+            raw_rows,
+            allowed_symbols=self.allowed_commodity_symbols,
+        )
+        self._log_commodity_filter_stats(raw_rows, normalized)
+        return normalized
+
+    def _log_commodity_filter_stats(
+        self,
+        raw_rows: List[Dict[str, Any]],
+        normalized: List[Dict[str, Any]],
+    ) -> None:
+        """Log kept-vs-raw commodity row counts whenever they change.
+
+        Noisy if logged every snapshot cycle (once per second), so we only emit
+        when the ratio changes. A sudden swing from ``kept 4 of 97`` to
+        ``kept 0 of 97`` is the tell-tale sign that the upstream site changed
+        its symbol format and the allowlist needs updating.
+        """
+        raw_count = len(raw_rows or [])
+        kept_count = len(normalized or [])
+        if (
+            raw_count == self._last_raw_commodity_count
+            and kept_count == self._last_kept_commodity_count
+        ):
+            return
+        self._last_raw_commodity_count = raw_count
+        self._last_kept_commodity_count = kept_count
+        allowed_count = len(self.allowed_commodity_symbols)
+        logger.info(
+            "[%s] Commodities filter: kept %d of %d raw rows (allowlist size=%d)",
+            self.source_name,
+            kept_count,
+            raw_count,
+            allowed_count,
+        )
 
     async def _select_tradingeconomics_commodity_table(self) -> Optional[Any]:
         if not self.page:
@@ -656,40 +714,56 @@ class SiteObserver:
 
         return None
 
-    @staticmethod
-    def _normalize_tradingeconomics_commodities(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    # Backwards-compatible alias for the canonical-pair helper.
+    # Prefer ``canonical_pair`` from ``app.utils.pair_normalizer`` in new code.
+    _strip_provider_suffix = staticmethod(canonical_pair)
+
+    @classmethod
+    def _normalize_tradingeconomics_commodities(
+        cls,
+        rows: List[Dict[str, Any]],
+        allowed_symbols: Optional[Iterable[str]] = None,
+    ) -> List[Dict[str, Any]]:
         """Normalize TradingEconomics commodity rows into payload format.
-        
-        Deduplicates by pair (preferring higher quality), and returns 
-        normalized shape compatible with downstream API.
+
+        - Strips provider suffixes (``:CUR``/``:COM``/``:IND``) so pair keys are
+          canonical base symbols (``XAUUSD``, ``CL1``, ...).
+        - Filters down to ``allowed_symbols`` (defaulting to the module-level
+          :data:`ALLOWED_COMMODITY_SYMBOLS`) so downstream consumers only ever
+          see the curated subset.
+        - Deduplicates by pair, preferring higher quality rows.
         """
-        # Accept all rows initially
+        allowlist = normalize_allowlist(allowed_symbols)
         all_rows = rows or []
-        
+
         # Deduplicate by pair, preferring rows with valid numeric price and common name
         seen_pairs: Dict[str, Dict[str, Any]] = {}
-        
+
         for row in all_rows:
-            pair = str(row.get("pair") or "").strip()
+            raw_pair = str(row.get("pair") or "").strip()
+            canonical = canonical_pair(raw_pair)
+            if not canonical or canonical not in allowlist:
+                continue
+
             price = str(row.get("price") or "").strip()
             common_name = str(row.get("common_name") or "").strip()
             change_text = str(row.get("change_text") or "").strip()
             group = str(row.get("group") or "").strip().lower()
-            
-            if not pair or not price:
+
+            if not price:
                 continue
-            
+
             # Score row quality: valid price + non-empty name + parseable change
             has_valid_price = bool(re.match(r"[+-]?\d+(?:\.\d+)?", price))
             has_name = len(common_name) > 0
             has_change = bool(re.search(r"[+-]?\d+", change_text))
-            
+
             # Group bonus: prefer rows from identified groups over fallback "TableX" or "Commodities"
             is_generic_group = "table" in group or "commodities" in group
             group_bonus = 2 if not is_generic_group else 0
-            
+
             quality_score = sum([has_valid_price, has_name, has_change]) + group_bonus
-            
+
             # Extract numeric change percentage
             change = None
             change_match = re.search(
@@ -698,25 +772,25 @@ class SiteObserver:
             )
             if change_match:
                 change = change_match.group(1)
-            
+
             normalized_row = {
-                "pair": pair,
+                "pair": canonical,
                 "common_name": common_name,
                 "price": price,
                 "change": change,
             }
-            
+
             # Keep row if it's new or higher quality than existing
-            if pair not in seen_pairs or quality_score > seen_pairs[pair].get("_quality", -1):
+            if canonical not in seen_pairs or quality_score > seen_pairs[canonical].get("_quality", -1):
                 normalized_row["_quality"] = quality_score
-                seen_pairs[pair] = normalized_row
-        
+                seen_pairs[canonical] = normalized_row
+
         # Remove internal quality marker and return
         result = [
             {k: v for k, v in row.items() if k != "_quality"}
             for row in seen_pairs.values()
         ]
-        
+
         return result
 
     @staticmethod

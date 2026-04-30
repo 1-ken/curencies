@@ -52,17 +52,23 @@ class Config:
                     continue
                 if not bool(item.get("enabled", True)):
                     continue
-                normalized_sources.append(
-                    {
-                        "name": item.get("name") or f"source-{index + 1}",
-                        "url": item.get("url", "https://finance.yahoo.com/markets/currencies/"),
-                        "waitSelector": item.get("waitSelector", "body"),
-                        "tableSelector": item.get("tableSelector", "table"),
-                        "pairCellSelector": item.get("pairCellSelector", "tbody tr td:nth-child(2)"),
-                        "injectMutationObserver": bool(item.get("injectMutationObserver", True)),
-                        "filterByMajors": bool(item.get("filterByMajors", True)),
-                    }
-                )
+                source_entry: Dict[str, Any] = {
+                    "name": item.get("name") or f"source-{index + 1}",
+                    "url": item.get("url", "https://finance.yahoo.com/markets/currencies/"),
+                    "waitSelector": item.get("waitSelector", "body"),
+                    "tableSelector": item.get("tableSelector", "table"),
+                    "pairCellSelector": item.get("pairCellSelector", "tbody tr td:nth-child(2)"),
+                    "injectMutationObserver": bool(item.get("injectMutationObserver", True)),
+                    "filterByMajors": bool(item.get("filterByMajors", True)),
+                }
+                # Commodities sources can override the curated allowlist via
+                # a simple list of canonical symbols. Unknown sources ignore it.
+                raw_allowed = item.get("allowedSymbols")
+                if isinstance(raw_allowed, list):
+                    source_entry["allowedSymbols"] = [
+                        str(symbol) for symbol in raw_allowed if symbol
+                    ]
+                normalized_sources.append(source_entry)
             if normalized_sources:
                 return normalized_sources
 

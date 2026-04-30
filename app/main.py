@@ -121,6 +121,16 @@ async def on_startup():
         try:
             await postgres_service.connect()
             await postgres_service.init_models()
+            # One-shot: rewrite legacy provider-suffixed pair values
+            # ("XAUUSD:CUR" -> "XAUUSD") so queries can rely on a single
+            # canonical spelling. Safe and idempotent on every restart.
+            try:
+                await postgres_service.migrate_legacy_pair_suffixes()
+            except Exception as migration_error:
+                logger.warning(
+                    "Legacy pair-suffix migration failed (continuing): %s",
+                    migration_error,
+                )
         except Exception as e:
             logger.warning("PostgreSQL unavailable: %s", e)
             postgres_service = None
@@ -138,6 +148,7 @@ async def on_startup():
                 ),
                 filter_by_majors=bool(source.get("filterByMajors", True)),
                 source_name=source_name,
+                allowed_commodity_symbols=source.get("allowedSymbols"),
             )
             try:
                 await source_observer.startup()

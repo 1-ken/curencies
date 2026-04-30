@@ -18,6 +18,7 @@
       "pairCellSelector": "tbody tr td.datatable-item-first b",
       "injectMutationObserver": true,
       "filterByMajors": false,
+      "allowedSymbols": ["CL1", "XAUUSD", "XAGUSD", "HG1"],
       "enabled": true
     }
   ],
