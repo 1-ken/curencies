@@ -29,13 +29,23 @@ class SMSService:
         current_price: float,
         condition: str,
         custom_message: str = "",
+        alert_type: str = "price",
+        created_at: str = "",
+        triggered_at: str = "",
+        timeframe: str = "",
     ) -> bool:
         """Send price alert SMS."""
         try:
+            condition_text = f"{condition} {target_price}".strip()
+            trigger_text = triggered_at or "N/A"
             msg_lines = [
-                f"ALERT: {pair} {condition} {target_price}",
-                f"Current: {current_price}",
+                f"{alert_type.upper()} ALERT",
+                f"PAIR: {pair}",
+                f"CONDITION: {condition_text}",
+                f"TRIGGERED: {trigger_text}",
             ]
+            if timeframe:
+                msg_lines.append(f"TIME FRAME: {timeframe}")
             if custom_message:
                 msg_lines.append(custom_message)
             msg = " | ".join(msg_lines)

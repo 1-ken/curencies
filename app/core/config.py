@@ -153,6 +153,49 @@ class Config:
         return int(os.getenv("REDIS_RECENT_MAXLEN", self.get("redisRecentMaxlen", 200)))
 
     @property
+    def redis_alert_queue_key(self) -> str:
+        return os.getenv("REDIS_ALERT_QUEUE_KEY", self.get("redisAlertQueueKey", "fx:alerts:events"))
+
+    @property
+    def alert_monitor_poll_timeout_seconds(self) -> float:
+        return float(
+            os.getenv(
+                "ALERT_MONITOR_POLL_TIMEOUT_SECONDS",
+                self.get("alertMonitorPollTimeoutSeconds", 0.05),
+            )
+        )
+
+    @property
+    def candle_check_interval_seconds(self) -> float:
+        return float(
+            os.getenv(
+                "CANDLE_CHECK_INTERVAL_SECONDS",
+                self.get("candleCheckIntervalSeconds", 0.25),
+            )
+        )
+
+    @property
+    def notification_worker_count(self) -> int:
+        return int(os.getenv("NOTIFICATION_WORKER_COUNT", self.get("notificationWorkerCount", 4)))
+
+    @property
+    def notification_max_retries(self) -> int:
+        return int(os.getenv("NOTIFICATION_MAX_RETRIES", self.get("notificationMaxRetries", 3)))
+
+    @property
+    def notification_retry_delay_seconds(self) -> float:
+        return float(
+            os.getenv(
+                "NOTIFICATION_RETRY_DELAY_SECONDS",
+                self.get("notificationRetryDelaySeconds", 1.0),
+            )
+        )
+
+    @property
+    def notification_dlq_key(self) -> str:
+        return os.getenv("NOTIFICATION_DLQ_KEY", self.get("notificationDlqKey", "fx:alerts:notifications:dlq"))
+
+    @property
     def redis_pubsub_enabled(self) -> bool:
         value = os.getenv("REDIS_PUBSUB_ENABLED", str(self.get("redisPubSubEnabled", True)))
         return value.lower() in {"1", "true", "yes", "on"}

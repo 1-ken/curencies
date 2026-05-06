@@ -30,6 +30,10 @@ class EmailService:
         current_price: float,
         condition: str,
         custom_message: str = "",
+        alert_type: str = "price",
+        created_at: str = "",
+        triggered_at: str = "",
+        timeframe: str = "",
     ) -> bool:
         """Send price alert email."""
         try:
@@ -42,21 +46,25 @@ class EmailService:
                             <p style="margin: 8px 0; white-space: pre-wrap;">{custom_message}</p>
                         </div>
                 """
-            
+            condition_text = f"{condition} {target_price}".strip()
+            trigger_text = triggered_at or self._get_timestamp()
+            timeframe_html = ""
+            if timeframe:
+                timeframe_html = f"<li><strong>TIME FRAME:</strong> {timeframe}</li>"
+
             message = Mail(
                 from_email=self.from_email,
                 to_emails=to_email,
-                subject=f"🚨 Price Alert: {pair} reached {condition} {target_price}",
+                subject=f"🚨 {alert_type.upper()} ALERT: {pair}",
                 html_content=f"""
                 <html>
                     <body>
-                        <h2>Price Alert Triggered!</h2>
-                        <p>Your alert for <strong>{pair}</strong> has been triggered.</p>
+                        <h2>{alert_type.upper()} ALERT</h2>
                         <ul>
-                            <li><strong>Pair:</strong> {pair}</li>
-                            <li><strong>Condition:</strong> Price {condition} {target_price}</li>
-                            <li><strong>Current Price:</strong> {current_price}</li>
-                            <li><strong>Time:</strong> {self._get_timestamp()}</li>
+                            <li><strong>PAIR:</strong> {pair}</li>
+                            <li><strong>CONDITION:</strong> {condition_text}</li>
+                            <li><strong>TRIGGERED:</strong> {trigger_text}</li>
+                            {timeframe_html}
                         </ul>
                         {custom_msg_html}
                         <p><a href="http://localhost:8000">View Dashboard</a></p>

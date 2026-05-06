@@ -77,7 +77,7 @@ async def create_alert(request: Union[CreateAlertRequest, CreateCandleAlertReque
             raise HTTPException(status_code=400, detail=f"Interval must be one of: {', '.join(valid_intervals)}")
         
         try:
-            alert = alert_manager.create_candle_alert(
+            alert = await alert_manager.create_candle_alert(
                 pair=request.pair,
                 interval=request.interval,
                 direction=request.direction,
@@ -104,7 +104,7 @@ async def create_alert(request: Union[CreateAlertRequest, CreateCandleAlertReque
         if request.channel == "call" and not request.phone:
             raise HTTPException(status_code=400, detail="Phone is required for call alerts")
 
-        alert = alert_manager.create_alert(
+        alert = await alert_manager.create_alert(
             pair=request.pair,
             target_price=request.target_price,
             condition=request.condition,
@@ -140,7 +140,7 @@ async def get_alert(alert_id: str):
 @router.delete("/{alert_id}", response_model=DeleteAlertResponse)
 async def delete_alert(alert_id: str):
     """Delete an alert."""
-    if alert_manager.delete_alert(alert_id):
+    if await alert_manager.delete_alert(alert_id):
         return {"success": True, "message": "Alert deleted"}
     raise HTTPException(status_code=404, detail="Alert not found")
 
@@ -202,7 +202,7 @@ async def update_alert(alert_id: str, request: Union[UpdateAlertRequest, UpdateC
             raise HTTPException(status_code=400, detail="Status must be 'active', 'triggered', or 'disabled'")
     
     # Perform update
-    updated_alert = alert_manager.update_alert(alert_id, updates)
+    updated_alert = await alert_manager.update_alert(alert_id, updates)
     if not updated_alert:
         raise HTTPException(status_code=404, detail="Alert not found")
     

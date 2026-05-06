@@ -51,6 +51,13 @@ RETENTION_CHECK_INTERVAL_SECONDS = 60.0
 RETENTION_TRIGGER_WEEKDAY_UTC = 6
 RETENTION_TRIGGER_HOUR_UTC = 22
 RETENTION_TRIGGER_MINUTE_WINDOW = 5
+ALERT_MONITOR_POLL_TIMEOUT_SECONDS = 0.05
+CANDLE_CHECK_INTERVAL_SECONDS = 0.25
+NOTIFICATION_WORKER_COUNT = 4
+NOTIFICATION_MAX_RETRIES = 3
+NOTIFICATION_RETRY_DELAY_SECONDS = 1.0
+NOTIFICATION_DLQ_KEY = "fx:alerts:notifications:dlq"
+NOTIFICATION_QUEUE_MAXSIZE = 500
 
 snapshot_failure_count = 0
 last_snapshot_ts: Optional[str] = None
@@ -60,6 +67,8 @@ _last_metrics_persist_at = 0.0
 retention_cleanup_last_run_at: Optional[str] = None
 retention_cleanup_last_result: Dict[str, Any] = {}
 _retention_cleanup_last_run_key: Optional[str] = None
+notification_queue: Optional[asyncio.Queue] = None
+notification_workers: List[asyncio.Task] = []
 
 
 def _is_retention_cleanup_window(now_utc: datetime) -> bool:
@@ -257,6 +266,26 @@ def set_runtime_tuning(
     WS_SEND_TIMEOUT_SECONDS = max(0.5, float(ws_send_timeout_seconds))
     ALERT_ACTION_TIMEOUT_SECONDS = max(1.0, float(alert_action_timeout_seconds))
     MAX_SNAPSHOT_FAILURES = max(1, int(max_snapshot_failures))
+
+
+def set_notification_dispatch_config(
+    poll_timeout_seconds: float,
+    candle_check_interval_seconds: float,
+    worker_count: int,
+    max_retries: int,
+    retry_delay_seconds: float,
+    dlq_key: str,
+):
+    """Set alert monitor and notification worker tuning."""
+    global ALERT_MONITOR_POLL_TIMEOUT_SECONDS, CANDLE_CHECK_INTERVAL_SECONDS
+    global NOTIFICATION_WORKER_COUNT, NOTIFICATION_MAX_RETRIES
+    global NOTIFICATION_RETRY_DELAY_SECONDS, NOTIFICATION_DLQ_KEY
+    ALERT_MONITOR_POLL_TIMEOUT_SECONDS = max(0.01, float(poll_timeout_seconds))
+    CANDLE_CHECK_INTERVAL_SECONDS = max(0.05, float(candle_check_interval_seconds))
+    NOTIFICATION_WORKER_COUNT = max(1, int(worker_count))
+    NOTIFICATION_MAX_RETRIES = max(0, int(max_retries))
+    NOTIFICATION_RETRY_DELAY_SECONDS = max(0.05, float(retry_delay_seconds))
+    NOTIFICATION_DLQ_KEY = str(dlq_key or NOTIFICATION_DLQ_KEY).strip() or NOTIFICATION_DLQ_KEY
 
 
 @router.get("/snapshot", response_model=SnapshotResponse)
@@ -752,6 +781,14 @@ async def _run_alert_action(func, **kwargs) -> bool:
     return False
 
 
+def _fanout_latest_snapshot() -> None:
+    if not latest_data:
+        return
+    current_subscribers = data_subscribers[:]
+    for queue in current_subscribers:
+        _queue_latest(queue, latest_data.copy())
+
+
 async def data_streaming_task():
     """Central task that continuously fetches market data and broadcasts to subscribers.
     
@@ -886,9 +923,103 @@ async def alert_monitoring_task():
     data_queue = asyncio.Queue(maxsize=50)
     data_subscribers.append(data_queue)
     logger.info(f"Alert monitor subscribed to data stream (total subscribers: {len(data_subscribers)})")
-    
+
+    global notification_queue, notification_workers
+    notification_queue = asyncio.Queue(maxsize=NOTIFICATION_QUEUE_MAXSIZE)
+
+    async def _enqueue_notification_job(job: Dict[str, Any]) -> None:
+        if not notification_queue:
+            return
+        try:
+            notification_queue.put_nowait(job)
+        except asyncio.QueueFull:
+            try:
+                notification_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            try:
+                notification_queue.put_nowait(job)
+            except asyncio.QueueFull:
+                logger.warning("Notification queue full; dropping alert notification")
+
+    async def _notification_worker(worker_id: int) -> None:
+        while True:
+            try:
+                if not notification_queue:
+                    await asyncio.sleep(0.1)
+                    continue
+                job = await notification_queue.get()
+                channel = str(job.get("channel") or "email")
+                retries = int(job.get("retries", 0))
+                alert = job.get("alert", {})
+                sent = False
+                if channel == "sms" and sms_service and alert.get("phone"):
+                    sent = await _run_alert_action(
+                        sms_service.send_price_alert,
+                        to_phone=alert["phone"],
+                        pair=alert["pair"],
+                        target_price=job.get("target_price"),
+                        current_price=job.get("current_price"),
+                        condition=job.get("condition"),
+                        custom_message=alert.get("custom_message", ""),
+                        alert_type=job.get("alert_type", "price"),
+                        created_at=job.get("created_at", ""),
+                        triggered_at=job.get("triggered_at", ""),
+                        timeframe=job.get("timeframe", ""),
+                    )
+                elif channel == "call" and call_service and alert.get("phone"):
+                    sent = await _run_alert_action(
+                        call_service.send_price_alert,
+                        to_phone=alert["phone"],
+                        pair=alert["pair"],
+                        target_price=job.get("target_price"),
+                        current_price=job.get("current_price"),
+                        condition=job.get("condition"),
+                        custom_message=alert.get("custom_message", ""),
+                    )
+                elif channel == "email" and email_service and alert.get("email"):
+                    sent = await _run_alert_action(
+                        email_service.send_price_alert,
+                        to_email=alert["email"],
+                        pair=alert["pair"],
+                        target_price=job.get("target_price"),
+                        current_price=job.get("current_price"),
+                        condition=job.get("condition"),
+                        custom_message=alert.get("custom_message", ""),
+                        alert_type=job.get("alert_type", "price"),
+                        created_at=job.get("created_at", ""),
+                        triggered_at=job.get("triggered_at", ""),
+                        timeframe=job.get("timeframe", ""),
+                    )
+                else:
+                    sent = True
+
+                if not sent:
+                    if retries < NOTIFICATION_MAX_RETRIES:
+                        await asyncio.sleep(NOTIFICATION_RETRY_DELAY_SECONDS)
+                        retry_job = dict(job)
+                        retry_job["retries"] = retries + 1
+                        await _enqueue_notification_job(retry_job)
+                    elif redis_service:
+                        try:
+                            await redis_service.push_json(NOTIFICATION_DLQ_KEY, job)
+                        except Exception as e:
+                            logger.error("Failed to write notification DLQ: %s", e)
+                if notification_queue:
+                    notification_queue.task_done()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error("Notification worker %s error: %s", worker_id, e)
+                await asyncio.sleep(0.1)
+
+    notification_workers = [
+        asyncio.create_task(_notification_worker(i))
+        for i in range(NOTIFICATION_WORKER_COUNT)
+    ]
+
     last_candle_check = 0.0
-    candle_check_interval = 1.0  # Check candle alerts every second for low-latency close triggers
+    candle_check_interval = CANDLE_CHECK_INTERVAL_SECONDS
     
     try:
         while True:
@@ -902,53 +1033,37 @@ async def alert_monitoring_task():
                 # Market is open - process latest stream item if available, but don't block candle checks
                 data = None
                 try:
-                    data = await asyncio.wait_for(data_queue.get(), timeout=0.2)
+                    data = await asyncio.wait_for(
+                        data_queue.get(),
+                        timeout=ALERT_MONITOR_POLL_TIMEOUT_SECONDS,
+                    )
                 except asyncio.TimeoutError:
                     data = None
 
                 if data is not None:
                     # ===== Check PRICE alerts (from live stream) =====
-                    triggered_alerts = await asyncio.to_thread(
-                        alert_manager.check_alerts,
-                        data.get("pairs", []),
-                    )
+                    triggered_alerts = await alert_manager.check_alerts(data.get("pairs", []))
                     if triggered_alerts:
                         logger.warning("Triggered %s price alert(s)", len(triggered_alerts))
                         for alert_data in triggered_alerts:
                             alert = alert_data["alert"]
                             current_price = alert_data["current_price"]
                             channel = alert.get("channel", "email")
-                            
-                            if channel == "sms" and sms_service and alert.get("phone"):
-                                await _run_alert_action(
-                                    sms_service.send_price_alert,
-                                    to_phone=alert["phone"],
-                                    pair=alert["pair"],
-                                    target_price=alert["target_price"],
-                                    current_price=current_price,
-                                    condition=alert["condition"],
-                                    custom_message=alert.get("custom_message", ""),
-                                )
-                            elif channel == "call" and call_service and alert.get("phone"):
-                                await _run_alert_action(
-                                    call_service.send_price_alert,
-                                    to_phone=alert["phone"],
-                                    pair=alert["pair"],
-                                    target_price=alert["target_price"],
-                                    current_price=current_price,
-                                    condition=alert["condition"],
-                                    custom_message=alert.get("custom_message", ""),
-                                )
-                            elif channel == "email" and email_service and alert.get("email"):
-                                await _run_alert_action(
-                                    email_service.send_price_alert,
-                                    to_email=alert["email"],
-                                    pair=alert["pair"],
-                                    target_price=alert["target_price"],
-                                    current_price=current_price,
-                                    condition=alert["condition"],
-                                    custom_message=alert.get("custom_message", ""),
-                                )
+                            await _enqueue_notification_job(
+                                {
+                                    "alert": alert,
+                                    "channel": channel,
+                                    "target_price": alert.get("target_price"),
+                                    "current_price": current_price,
+                                    "condition": alert.get("condition"),
+                                    "alert_type": alert.get("alert_type", "price"),
+                                    "created_at": alert.get("created_at", ""),
+                                    "triggered_at": alert.get("triggered_at", ""),
+                                    "timeframe": "",
+                                    "retries": 0,
+                                }
+                            )
+                        _fanout_latest_snapshot()
                 
                 # ===== Check CANDLE-CLOSE alerts (from PostgreSQL, on timer) =====
                 now = time.monotonic()
@@ -975,10 +1090,7 @@ async def alert_monitoring_task():
                             ])
                             
                             # Check and dispatch candle alerts
-                            triggered_candle_alerts = await asyncio.to_thread(
-                                alert_manager.check_candle_alerts,
-                                candle_data,
-                            )
+                            triggered_candle_alerts = await alert_manager.check_candle_alerts(candle_data)
                             
                             if triggered_candle_alerts:
                                 logger.warning("Triggered %s candle alert(s)", len(triggered_candle_alerts))
@@ -986,37 +1098,21 @@ async def alert_monitoring_task():
                                     alert = alert_data["alert"]
                                     close_price = alert_data.get("close_price", alert_data.get("current_price"))
                                     channel = alert.get("channel", "email")
-                                    
-                                    if channel == "sms" and sms_service and alert.get("phone"):
-                                        await _run_alert_action(
-                                            sms_service.send_price_alert,
-                                            to_phone=alert["phone"],
-                                            pair=alert["pair"],
-                                            target_price=alert["threshold"],
-                                            current_price=close_price,
-                                            condition=alert["direction"],
-                                            custom_message=alert.get("custom_message", ""),
-                                        )
-                                    elif channel == "call" and call_service and alert.get("phone"):
-                                        await _run_alert_action(
-                                            call_service.send_price_alert,
-                                            to_phone=alert["phone"],
-                                            pair=alert["pair"],
-                                            target_price=alert["threshold"],
-                                            current_price=close_price,
-                                            condition=alert["direction"],
-                                            custom_message=alert.get("custom_message", ""),
-                                        )
-                                    elif channel == "email" and email_service and alert.get("email"):
-                                        await _run_alert_action(
-                                            email_service.send_price_alert,
-                                            to_email=alert["email"],
-                                            pair=alert["pair"],
-                                            target_price=alert["threshold"],
-                                            current_price=close_price,
-                                            condition=alert["direction"],
-                                            custom_message=alert.get("custom_message", ""),
-                                        )
+                                    await _enqueue_notification_job(
+                                        {
+                                            "alert": alert,
+                                            "channel": channel,
+                                            "target_price": alert.get("threshold"),
+                                            "current_price": close_price,
+                                            "condition": alert.get("direction"),
+                                            "alert_type": "candle_close",
+                                            "created_at": alert.get("created_at", ""),
+                                            "triggered_at": alert.get("triggered_at", ""),
+                                            "timeframe": alert.get("interval", ""),
+                                            "retries": 0,
+                                        }
+                                    )
+                                _fanout_latest_snapshot()
                     except Exception as e:
                         logger.error(f"Error checking candle alerts: {e}")
                         
@@ -1027,6 +1123,15 @@ async def alert_monitoring_task():
                 # Continue running even if there's an error
                 await asyncio.sleep(0.1)
     finally:
+        for worker in notification_workers:
+            worker.cancel()
+        for worker in notification_workers:
+            try:
+                await worker
+            except asyncio.CancelledError:
+                pass
+        notification_workers = []
+        notification_queue = None
         # Unsubscribe on exit
         if data_queue in data_subscribers:
             data_subscribers.remove(data_queue)

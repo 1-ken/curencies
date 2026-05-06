@@ -61,6 +61,7 @@ background_task: asyncio.Task | None = None
 data_stream_task: asyncio.Task | None = None
 archive_task: asyncio.Task | None = None
 cleanup_task: asyncio.Task | None = None
+alert_persistence_task: asyncio.Task | None = None
 redis_service: RedisService | None = None
 postgres_service: PostgresService | None = None
 
@@ -91,6 +92,7 @@ else:
 async def on_startup():
     """Initialize the observer on application startup."""
     global observer, observers, background_task, data_stream_task, archive_task, cleanup_task
+    global alert_persistence_task
     global redis_service, postgres_service
     logger.info("Starting Finance Observer application...")
     
@@ -113,6 +115,7 @@ async def on_startup():
         except Exception as e:
             logger.warning("Redis unavailable: %s", e)
             redis_service = None
+        alert_manager.configure_redis(redis_service, config.redis_alert_queue_key)
 
         postgres_service = PostgresService(
             config.postgres_dsn,
@@ -121,6 +124,7 @@ async def on_startup():
         try:
             await postgres_service.connect()
             await postgres_service.init_models()
+            await alert_manager.configure_postgres(postgres_service)
             # One-shot: rewrite legacy provider-suffixed pair values
             # ("XAUUSD:CUR" -> "XAUUSD") so queries can rely on a single
             # canonical spelling. Safe and idempotent on every restart.
@@ -134,6 +138,7 @@ async def on_startup():
         except Exception as e:
             logger.warning("PostgreSQL unavailable: %s", e)
             postgres_service = None
+            await alert_manager.configure_postgres(None)
 
         observers = []
         for source in config.sources:
@@ -176,6 +181,14 @@ async def on_startup():
             config.alert_action_timeout_seconds,
             config.max_snapshot_failures,
         )
+        data_endpoints.set_notification_dispatch_config(
+            config.alert_monitor_poll_timeout_seconds,
+            config.candle_check_interval_seconds,
+            config.notification_worker_count,
+            config.notification_max_retries,
+            config.notification_retry_delay_seconds,
+            config.notification_dlq_key,
+        )
         data_endpoints.set_redis_service(redis_service, config.redis_pubsub_enabled)
         data_endpoints.set_postgres_service(postgres_service)
         data_endpoints.set_archive_config(
@@ -202,6 +215,10 @@ async def on_startup():
         if postgres_service:
           cleanup_task = asyncio.create_task(data_endpoints.retention_cleanup_task())
           logger.info("Retention cleanup task started")
+
+        if redis_service and postgres_service:
+            alert_persistence_task = asyncio.create_task(_alert_persistence_flush_task())
+            logger.info("Alert persistence flush task started")
     except Exception as e:
         logger.error(f"Failed to start observer: {e}")
         raise
@@ -210,7 +227,7 @@ async def on_startup():
 @app.on_event("shutdown")
 async def on_shutdown():
     """Clean up resources on application shutdown."""
-    global background_task, data_stream_task, archive_task, cleanup_task
+    global background_task, data_stream_task, archive_task, cleanup_task, alert_persistence_task
     global redis_service, postgres_service
     
     logger.info("Shutting down Finance Observer...")
@@ -251,6 +268,15 @@ async def on_shutdown():
         except asyncio.CancelledError:
             pass
         logger.info("Retention cleanup task cancelled")
+
+    if alert_persistence_task:
+        logger.info("Cancelling alert persistence flush task...")
+        alert_persistence_task.cancel()
+        try:
+            await alert_persistence_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Alert persistence flush task cancelled")
     
     for obs in observers:
         logger.info("Shutting down observer '%s'...", getattr(obs, "source_name", "default"))
@@ -273,6 +299,21 @@ async def on_shutdown():
             logger.error("Error closing PostgreSQL: %s", e)
     
     logger.info("Finance Observer shutdown complete")
+
+
+async def _alert_persistence_flush_task() -> None:
+    """Flush Redis-backed alert persistence events into PostgreSQL."""
+    logger.info("Alert persistence worker started")
+    while True:
+        try:
+            flushed = await alert_manager.flush_persistence_events(batch_size=100)
+            await asyncio.sleep(0.05 if flushed > 0 else 0.2)
+        except asyncio.CancelledError:
+            logger.info("Alert persistence worker cancelled")
+            break
+        except Exception as e:
+            logger.error("Alert persistence worker error: %s", e)
+            await asyncio.sleep(0.5)
 
 
 # ─── Liveness & readiness health endpoint ───────────────────────────────────

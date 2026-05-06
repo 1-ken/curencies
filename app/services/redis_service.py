@@ -121,6 +121,36 @@ class RedisService:
             payloads = [payloads]
         return [json.loads(item) for item in payloads]
 
+    async def push_json(self, queue_key: str, payload: Dict[str, Any]) -> None:
+        encoded = json.dumps(payload)
+
+        async def _push() -> None:
+            await self.client.rpush(queue_key, encoded)
+
+        await self._run_with_retry(f"push_json:{queue_key}", _push)
+
+    async def read_json_queue(self, queue_key: str, batch_size: int) -> List[Dict[str, Any]]:
+        async def _read():
+            return await self.client.lpop(queue_key, count=batch_size)
+
+        payloads = await self._run_with_retry(f"read_json_queue:{queue_key}", _read)
+        if not payloads:
+            return []
+        if isinstance(payloads, str):
+            payloads = [payloads]
+        return [json.loads(item) for item in payloads]
+
+    async def requeue_json_batch(self, queue_key: str, payloads: List[Dict[str, Any]]) -> None:
+        if not payloads:
+            return
+        encoded = [json.dumps(item) for item in payloads]
+
+        async def _requeue() -> None:
+            # LPUSH reversed payload list preserves original order.
+            await self.client.lpush(queue_key, *reversed(encoded))
+
+        await self._run_with_retry(f"requeue_json_batch:{queue_key}", _requeue)
+
     async def subscribe(self, stop_event: Optional[asyncio.Event] = None) -> AsyncIterator[Dict[str, Any]]:
         reconnect_attempt = 0
 

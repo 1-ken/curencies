@@ -1,19 +1,15 @@
-"""
-Alert management system for price notifications.
-"""
-import json
+"""Alert management system for price notifications."""
 import logging
-from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional
-from dataclasses import dataclass, asdict
 import uuid
+from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
 
+from app.services.postgres_service import PostgresService
+from app.services.redis_service import RedisService
 from app.utils.pair_normalizer import canonical_pair
 
 logger = logging.getLogger(__name__)
-
-ALERTS_FILE = "alerts.json"
-
 
 @dataclass
 class Alert:
@@ -53,62 +49,147 @@ class Alert:
 
 
 class AlertManager:
-    """Manages price alerts and persistence."""
+    """Manages price alerts and PostgreSQL persistence."""
 
-    def __init__(self, file_path: str = ALERTS_FILE):
+    def __init__(
+        self,
+        file_path: Optional[str] = None,
+        postgres_service: Optional[PostgresService] = None,
+        redis_service: Optional[RedisService] = None,
+        redis_alert_queue_key: str = "fx:alerts:events",
+    ):
         self.file_path = file_path
+        self.postgres_service = postgres_service
+        self.redis_service = redis_service
+        self.redis_alert_queue_key = redis_alert_queue_key
         self.alerts: Dict[str, Alert] = {}
-        self._load_alerts()
+        self._active_price_alert_index: Dict[str, List[str]] = {}
+        self._loaded = False
 
-    def _load_alerts(self) -> None:
-        """Load alerts from file and migrate legacy pair spellings.
+    async def configure_postgres(self, postgres_service: Optional[PostgresService]) -> None:
+        self.postgres_service = postgres_service
+        self._loaded = False
+        await self.load_alerts()
 
-        Historically ``alerts.json`` has contained non-canonical pair forms
-        ("xauusd", "XAGUSDCUR", "EUR/USD"). On load we canonicalize them via
-        :func:`canonical_pair` and persist back if anything changed, so the
-        file converges to a single clean representation over time.
-        """
-        try:
-            with open(self.file_path, "r") as f:
-                data = json.load(f)
-        except FileNotFoundError:
-            logger.info("No existing alerts file, starting fresh")
+    def configure_redis(
+        self,
+        redis_service: Optional[RedisService],
+        redis_alert_queue_key: str = "fx:alerts:events",
+    ) -> None:
+        self.redis_service = redis_service
+        self.redis_alert_queue_key = redis_alert_queue_key
+
+    async def load_alerts(self) -> None:
+        if self._loaded:
+            return
+        if not self.postgres_service:
+            logger.warning("AlertManager started without PostgreSQL; alerts stay in-memory only")
             self.alerts = {}
+            self._loaded = True
             return
 
         self.alerts = {}
-        migrated_count = 0
-        for alert_id, alert_data in data.items():
-            alert_obj = Alert.from_dict(alert_data)
+        rows = await self.postgres_service.list_alerts()
+        for row in rows:
+            alert_obj = Alert(
+                id=row.id,
+                pair=row.pair,
+                status=row.status,
+                created_at=row.created_at.isoformat(),
+                alert_type=row.alert_type,
+                channel=row.channel,
+                email=row.email,
+                phone=row.phone,
+                custom_message=row.custom_message,
+                triggered_at=row.triggered_at.isoformat() if row.triggered_at else None,
+                last_checked_price=row.last_checked_price,
+                close_price=row.close_price,
+                target_price=row.target_price,
+                condition=row.condition,
+                interval=row.interval,
+                direction=row.direction,
+                threshold=row.threshold,
+                last_evaluated_candle_time=(
+                    row.last_evaluated_candle_time.isoformat()
+                    if row.last_evaluated_candle_time
+                    else None
+                ),
+            )
             if alert_obj.alert_type == "candle_close":
                 alert_obj.interval = self._normalize_interval(alert_obj.interval)
-
             canonical = canonical_pair(alert_obj.pair)
-            if canonical and canonical != alert_obj.pair:
-                logger.info(
-                    "Migrating alert %s pair '%s' -> canonical '%s'",
-                    alert_obj.id,
-                    alert_obj.pair,
-                    canonical,
-                )
+            if canonical:
                 alert_obj.pair = canonical
-                migrated_count += 1
-
-            self.alerts[alert_id] = alert_obj
-
-        if migrated_count:
-            logger.info("Persisting %d migrated alert(s) back to %s", migrated_count, self.file_path)
-            self._save_alerts()
+            self.alerts[alert_obj.id] = alert_obj
+        self._loaded = True
+        self._rebuild_indexes()
         logger.info("Loaded %d alerts", len(self.alerts))
 
-    def _save_alerts(self) -> None:
-        """Save alerts to file."""
-        with open(self.file_path, "w") as f:
-            json.dump(
-                {alert_id: alert.to_dict() for alert_id, alert in self.alerts.items()},
-                f,
-                indent=2,
-            )
+    def _rebuild_indexes(self) -> None:
+        index: Dict[str, List[str]] = {}
+        for alert in self.alerts.values():
+            if alert.status != "active" or alert.alert_type != "price":
+                continue
+            pair_key = self._normalize_pair(alert.pair)
+            if not pair_key:
+                continue
+            index.setdefault(pair_key, []).append(alert.id)
+        self._active_price_alert_index = index
+
+    async def _persist_alert(self, alert: Alert) -> None:
+        payload = {
+            "event_id": str(uuid.uuid4()),
+            "event_ts": self._utc_now_iso(),
+            "op": "upsert",
+            "alert_id": alert.id,
+            "alert": alert.to_dict(),
+        }
+        if self.redis_service:
+            await self.redis_service.push_json(self.redis_alert_queue_key, payload)
+            return
+        if not self.postgres_service:
+            return
+        await self.postgres_service.upsert_alert(payload["alert"])
+
+    async def _persist_delete(self, alert_id: str) -> None:
+        payload = {
+            "event_id": str(uuid.uuid4()),
+            "event_ts": self._utc_now_iso(),
+            "op": "delete",
+            "alert_id": alert_id,
+        }
+        if self.redis_service:
+            await self.redis_service.push_json(self.redis_alert_queue_key, payload)
+            return
+        if self.postgres_service:
+            await self.postgres_service.delete_alert(alert_id)
+
+    async def flush_persistence_events(self, batch_size: int = 100) -> int:
+        if not self.redis_service or not self.postgres_service:
+            return 0
+
+        batch = await self.redis_service.read_json_queue(
+            self.redis_alert_queue_key,
+            max(1, int(batch_size)),
+        )
+        if not batch:
+            return 0
+
+        try:
+            for event in batch:
+                op = str(event.get("op", "")).strip().lower()
+                if op == "upsert":
+                    payload = event.get("alert") or {}
+                    if isinstance(payload, dict) and payload.get("id"):
+                        await self.postgres_service.upsert_alert(payload)
+                elif op == "delete":
+                    alert_id = str(event.get("alert_id", "")).strip()
+                    if alert_id:
+                        await self.postgres_service.delete_alert(alert_id)
+            return len(batch)
+        except Exception:
+            await self.redis_service.requeue_json_batch(self.redis_alert_queue_key, batch)
+            raise
 
     @staticmethod
     def _utc_now_iso() -> str:
@@ -148,7 +229,7 @@ class AlertManager:
             return None
         return str(interval).strip().lower()
 
-    def create_alert(
+    async def create_alert(
         self,
         pair: str,
         target_price: float,
@@ -180,11 +261,12 @@ class AlertManager:
             created_at=self._utc_now_iso(),
         )
         self.alerts[alert_id] = alert
-        self._save_alerts()
+        self._rebuild_indexes()
+        await self._persist_alert(alert)
         logger.info(f"Created price alert {alert_id} for {canonical} at {target_price}")
         return alert
 
-    def create_candle_alert(
+    async def create_candle_alert(
         self,
         pair: str,
         interval: str,
@@ -221,7 +303,8 @@ class AlertManager:
             last_evaluated_candle_time=None,
         )
         self.alerts[alert_id] = alert
-        self._save_alerts()
+        self._rebuild_indexes()
+        await self._persist_alert(alert)
         logger.info(f"Created candle-close alert {alert_id} for {canonical} {normalized_interval} {direction} {threshold}")
         return alert
 
@@ -252,16 +335,17 @@ class AlertManager:
         """Get active alerts ordered by most recent creation time."""
         return self._sort_alerts_by_recency(self.get_active_alerts())
 
-    def delete_alert(self, alert_id: str) -> bool:
+    async def delete_alert(self, alert_id: str) -> bool:
         """Delete an alert."""
         if alert_id in self.alerts:
             del self.alerts[alert_id]
-            self._save_alerts()
+            self._rebuild_indexes()
+            await self._persist_delete(alert_id)
             logger.info(f"Deleted alert {alert_id}")
             return True
         return False
 
-    def update_alert(self, alert_id: str, updates: Dict[str, Any]) -> Optional[Alert]:
+    async def update_alert(self, alert_id: str, updates: Dict[str, Any]) -> Optional[Alert]:
         """Update an existing alert with new values.
         
         Args:
@@ -292,11 +376,12 @@ class AlertManager:
                 if key in updates and updates[key] is not None:
                     setattr(alert, key, updates[key])
         
-        self._save_alerts()
+        await self._persist_alert(alert)
+        self._rebuild_indexes()
         logger.info(f"Updated alert {alert_id}")
         return alert
 
-    def trigger_alert(self, alert_id: str, current_price: float) -> bool:
+    async def trigger_alert(self, alert_id: str, current_price: float) -> bool:
         """Mark an alert as triggered."""
         alert = self.get_alert(alert_id)
         if alert:
@@ -304,12 +389,13 @@ class AlertManager:
             alert.triggered_at = self._utc_now_iso()
             alert.last_checked_price = current_price
             alert.close_price = current_price
-            self._save_alerts()
+            await self._persist_alert(alert)
+            self._rebuild_indexes()
             logger.info(f"Triggered alert {alert_id} at price {current_price}")
             return True
         return False
 
-    def check_alerts(self, pairs_data: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+    async def check_alerts(self, pairs_data: List[Dict[str, str]]) -> List[Dict[str, Any]]:
         """
         Check if any active alerts should be triggered.
         Returns list of triggered alerts with their data.
@@ -333,38 +419,37 @@ class AlertManager:
                 logger.debug(f"Skipping invalid price data for {pair_raw}: {price_raw}")
                 continue
 
-        active_alerts = self.get_active_alerts()
-        
-        for alert in active_alerts:
-            normalized_alert_pair = self._normalize_pair(alert.pair)
-            
-            if normalized_alert_pair not in prices:
+        for normalized_pair, current_price in prices.items():
+            alert_ids = self._active_price_alert_index.get(normalized_pair, [])
+            if not alert_ids:
                 continue
-            
-            current_price = prices[normalized_alert_pair]
-            alert.last_checked_price = current_price
-            
-            should_trigger = False
-            if alert.condition == "above" and current_price >= alert.target_price:
-                should_trigger = True
-            elif alert.condition == "below" and current_price <= alert.target_price:
-                should_trigger = True
-            elif alert.condition == "equal":
-                # Use tolerance of 0.0001 for "equal" condition (matches within 1 pip)
-                tolerance = 0.0001
-                if abs(current_price - alert.target_price) <= tolerance:
+            for alert_id in list(alert_ids):
+                alert = self.alerts.get(alert_id)
+                if not alert or alert.status != "active" or alert.alert_type != "price":
+                    continue
+                alert.last_checked_price = current_price
+
+                should_trigger = False
+                if alert.condition == "above" and current_price >= alert.target_price:
                     should_trigger = True
-            
-            if should_trigger:
-                logger.warning(
-                    "⚠️  ALERT TRIGGERED: %s %s %s | Current Price: %s",
-                    alert.pair, alert.condition, alert.target_price, current_price
-                )
-                self.trigger_alert(alert.id, current_price)
-                triggered.append({
-                    "alert": alert.to_dict(),
-                    "current_price": current_price,
-                })
+                elif alert.condition == "below" and current_price <= alert.target_price:
+                    should_trigger = True
+                elif alert.condition == "equal":
+                    # Use tolerance of 0.0001 for "equal" condition (matches within 1 pip)
+                    tolerance = 0.0001
+                    if abs(current_price - alert.target_price) <= tolerance:
+                        should_trigger = True
+
+                if should_trigger:
+                    logger.warning(
+                        "⚠️  ALERT TRIGGERED: %s %s %s | Current Price: %s",
+                        alert.pair, alert.condition, alert.target_price, current_price
+                    )
+                    await self.trigger_alert(alert.id, current_price)
+                    triggered.append({
+                        "alert": alert.to_dict(),
+                        "current_price": current_price,
+                    })
         
         return triggered
 
@@ -377,7 +462,7 @@ class AlertManager:
         """
         return canonical_pair(pair)
 
-    def check_candle_alerts(self, ohlc_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    async def check_candle_alerts(self, ohlc_data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Check candle-close threshold alerts against latest closed candles.
         
@@ -436,7 +521,7 @@ class AlertManager:
                 if candle_close_time <= alert_created_at:
                     # Mark stale pre-creation candle as evaluated to avoid repeated checks.
                     alert.last_evaluated_candle_time = str(candle_time)
-                    self._save_alerts()
+                    await self._persist_alert(alert)
                     continue
             
             # Skip if we already evaluated this exact candle for this alert
@@ -460,7 +545,7 @@ class AlertManager:
                 alert.last_checked_price = close_price
                 alert.close_price = close_price
                 alert.last_evaluated_candle_time = str(candle_time)
-                self._save_alerts()
+                await self._persist_alert(alert)
                 triggered.append({
                     "alert": alert.to_dict(),
                     "current_price": close_price,

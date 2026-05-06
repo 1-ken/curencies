@@ -9,7 +9,7 @@ from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
-from app.models import Base, HistoricalPrice, StreamMetric
+from app.models import AlertRecord, Base, HistoricalPrice, StreamMetric
 from app.utils.pair_normalizer import (
     PROVIDER_SUFFIXES,
     canonical_pair,
@@ -200,6 +200,63 @@ class PostgresService:
         async with self._sessionmaker() as session:
             session.add(row)
             await session.commit()
+
+    async def upsert_alert(self, payload: Dict[str, Any]) -> None:
+        if not self._sessionmaker:
+            raise RuntimeError("PostgreSQL session not initialized")
+
+        alert_id = str(payload.get("id", "")).strip()
+        if not alert_id:
+            raise ValueError("Alert id is required")
+
+        async with self._sessionmaker() as session:
+            existing = await session.get(AlertRecord, alert_id)
+            if existing is None:
+                existing = AlertRecord(id=alert_id)
+                session.add(existing)
+
+            existing.pair = str(payload.get("pair") or "")
+            existing.status = str(payload.get("status") or "active")
+            existing.created_at = self._parse_datetime(payload.get("created_at")) or datetime.now(
+                timezone.utc
+            )
+            existing.alert_type = str(payload.get("alert_type") or "price")
+            existing.channel = str(payload.get("channel") or "email")
+            existing.email = str(payload.get("email") or "")
+            existing.phone = str(payload.get("phone") or "")
+            existing.custom_message = str(payload.get("custom_message") or "")
+            existing.triggered_at = self._parse_datetime(payload.get("triggered_at"))
+            existing.last_checked_price = self._parse_optional_float(payload.get("last_checked_price"))
+            existing.close_price = self._parse_optional_float(payload.get("close_price"))
+            existing.target_price = self._parse_optional_float(payload.get("target_price"))
+            existing.condition = self._parse_optional_str(payload.get("condition"))
+            existing.interval = self._parse_optional_str(payload.get("interval"))
+            existing.direction = self._parse_optional_str(payload.get("direction"))
+            existing.threshold = self._parse_optional_float(payload.get("threshold"))
+            existing.last_evaluated_candle_time = self._parse_datetime(
+                payload.get("last_evaluated_candle_time")
+            )
+            await session.commit()
+
+    async def delete_alert(self, alert_id: str) -> bool:
+        if not self._sessionmaker:
+            raise RuntimeError("PostgreSQL session not initialized")
+
+        async with self._sessionmaker() as session:
+            row = await session.get(AlertRecord, alert_id)
+            if row is None:
+                return False
+            await session.delete(row)
+            await session.commit()
+            return True
+
+    async def list_alerts(self) -> List[AlertRecord]:
+        if not self._sessionmaker:
+            raise RuntimeError("PostgreSQL session not initialized")
+        stmt = select(AlertRecord).order_by(AlertRecord.created_at.desc(), AlertRecord.id.desc())
+        async with self._sessionmaker() as session:
+            result = await session.execute(stmt)
+            return list(result.scalars().all())
 
     async def query_stream_metrics(
         self,
@@ -461,6 +518,45 @@ class PostgresService:
             return float(str(value).replace(",", ""))
         except ValueError:
             return None
+
+    @staticmethod
+    def _parse_optional_float(value: Any) -> Optional[float]:
+        if value is None or value == "":
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _parse_datetime(value: Any) -> Optional[datetime]:
+        if value is None or value == "":
+            return None
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                return value.replace(tzinfo=timezone.utc)
+            return value.astimezone(timezone.utc)
+        if isinstance(value, str):
+            normalized = value.strip()
+            if not normalized:
+                return None
+            if normalized.endswith("Z"):
+                normalized = normalized[:-1] + "+00:00"
+            try:
+                parsed = datetime.fromisoformat(normalized)
+            except ValueError:
+                return None
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        return None
+
+    @staticmethod
+    def _parse_optional_str(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        cleaned = str(value).strip()
+        return cleaned or None
 
     @staticmethod
     def _normalize_pair(value: Optional[str]) -> Optional[str]:
