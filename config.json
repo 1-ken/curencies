@@ -30,6 +30,16 @@
       "injectMutationObserver": true,
       "filterByMajors": false,
       "enabled": true
+    },
+    {
+      "name": "usd-index",
+      "url": "https://tradingeconomics.com/united-states/currency",
+      "waitSelector": "table tbody tr[data-symbol]",
+      "tableSelector": "table.table.table-hover.table-striped.table-heatmap",
+      "pairCellSelector": "tbody tr td:first-child b",
+      "injectMutationObserver": true,
+      "filterByMajors": false,
+      "enabled": true
     }
   ],
   "url": "https://finance.yahoo.com/markets/currencies/",

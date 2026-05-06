@@ -345,5 +345,69 @@ class TradingEconomicsBondsParsingTests(unittest.TestCase):
         self.assertEqual(parsed[0]["change"], "0.063")
 
 
+class TradingEconomicsUsdIndexParsingTests(unittest.TestCase):
+    def test_maps_dxy_cur_to_dxy(self):
+        rows = [
+            {
+                "row_index": 0,
+                "pair": "DXY:CUR",
+                "common_name": "DXY",
+                "price": "98.83",
+                "change_text": "-0.21%",
+            },
+            {
+                "row_index": 1,
+                "pair": "EUR:CUR",
+                "common_name": "Euro",
+                "price": "1.17",
+                "change_text": "0.02%",
+            },
+        ]
+
+        parsed = SiteObserver._normalize_tradingeconomics_usd_index(rows)
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["pair"], "DXY")
+        self.assertEqual(parsed[0]["common_name"], "DXY")
+        self.assertEqual(parsed[0]["price"], "98.83")
+        self.assertEqual(parsed[0]["change"], "-0.21")
+
+    def test_skips_dxy_rows_without_price(self):
+        rows = [
+            {
+                "row_index": 0,
+                "pair": "DXY:CUR",
+                "common_name": "DXY",
+                "price": "",
+                "change_text": "-0.21%",
+            },
+        ]
+        parsed = SiteObserver._normalize_tradingeconomics_usd_index(rows)
+        self.assertEqual(parsed, [])
+
+    def test_deduplicates_dxy_preferring_higher_quality(self):
+        rows = [
+            {
+                "row_index": 0,
+                "pair": "DXY:CUR",
+                "common_name": "",
+                "price": "98.83",
+                "change_text": "",
+            },
+            {
+                "row_index": 1,
+                "pair": "DXY:CUR",
+                "common_name": "DXY",
+                "price": "98.83",
+                "change_text": "-0.21%",
+            },
+        ]
+
+        parsed = SiteObserver._normalize_tradingeconomics_usd_index(rows)
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["pair"], "DXY")
+        self.assertEqual(parsed[0]["common_name"], "DXY")
+        self.assertEqual(parsed[0]["change"], "-0.21")
+
+
 if __name__ == "__main__":
     unittest.main()

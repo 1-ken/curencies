@@ -317,7 +317,9 @@ async def snapshot():
                     {
                         "market_status": "open" if is_forex_market_open() else "closed",
                         "pairs": {
-                            "currencies": cached_sources.get("currencies", []),
+                            "currencies": cached_sources.get("currencies", [])
+                            + cached_sources.get("usd-index", [])
+                            + cached_sources.get("dxy", []),
                             "commodities": cached_sources.get("commodities", [])
                             + cached_sources.get("bonds", []),
                         },
@@ -340,7 +342,9 @@ async def snapshot():
         clean_data = {
             "market_status": "open" if is_forex_market_open() else "closed",
             "pairs": {
-                "currencies": grouped_pairs.get("currencies", []),
+                "currencies": grouped_pairs.get("currencies", [])
+                + grouped_pairs.get("usd-index", [])
+                + grouped_pairs.get("dxy", []),
                 "commodities": grouped_pairs.get("commodities", [])
                 + grouped_pairs.get("bonds", []),
             },
@@ -560,7 +564,9 @@ def _attach_alerts(data: Dict[str, Any]) -> Dict[str, Any]:
     clean_data = {
         "market_status": "open" if is_forex_market_open() else "closed",
         "pairs": {
-            "currencies": grouped_pairs.get("currencies", []),
+            "currencies": grouped_pairs.get("currencies", [])
+            + grouped_pairs.get("usd-index", [])
+            + grouped_pairs.get("dxy", []),
             "commodities": grouped_pairs.get("commodities", [])
             + grouped_pairs.get("bonds", []),
         },

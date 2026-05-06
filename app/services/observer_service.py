@@ -30,6 +30,9 @@ ALLOWED_COMMODITY_SYMBOLS = DEFAULT_ALLOWED_COMMODITY_SYMBOLS
 BOND_SYMBOL_MAP: Dict[str, str] = {
     "USGG10YR:IND": "US10Y",
 }
+DXY_SYMBOL_MAP: Dict[str, str] = {
+    "DXY:CUR": "DXY",
+}
 
 
 class SiteObserver:
@@ -66,6 +69,8 @@ class SiteObserver:
         self._last_kept_commodity_count: Optional[int] = None
         self._last_raw_bond_count: Optional[int] = None
         self._last_kept_bond_count: Optional[int] = None
+        self._last_raw_usd_index_count: Optional[int] = None
+        self._last_kept_usd_index_count: Optional[int] = None
 
         self._pw = None
         self.browser: Optional[Browser] = None
@@ -532,6 +537,8 @@ class SiteObserver:
             return await self._extract_tradingeconomics_commodities()
         if source == "bonds":
             return await self._extract_tradingeconomics_bonds()
+        if source in {"usd-index", "dxy"}:
+            return await self._extract_tradingeconomics_usd_index()
 
         js = f"""
         (() => {{
@@ -663,7 +670,7 @@ class SiteObserver:
                         
                         // Cell 1: price
                         const priceRaw = normalize(cells[1]?.textContent || '').replace(/,/g, '');
-                        const priceMatch = priceRaw.match(/([+-]?\d+(?:\.\d+)?)/);
+                        const priceMatch = priceRaw.match(/([+-]?\\d+(?:\\.\\d+)?)/);
                         
                         // Cell 2: change (day change, usually right after price)
                         let changeText = '';
@@ -809,6 +816,132 @@ class SiteObserver:
             kept_count,
             raw_count,
             len(BOND_SYMBOL_MAP),
+        )
+
+    async def _extract_tradingeconomics_usd_index(self) -> List[Dict[str, Any]]:
+        """Extract and normalize US currency index rows from TradingEconomics page."""
+        if not self.page:
+            return []
+
+        raw_rows: List[Dict[str, Any]] = await self.page.evaluate(
+            """
+            () => {
+                const normalize = (value) => (value || '').toString().trim();
+                const allRows = [];
+                const rows = Array.from(
+                    document.querySelectorAll("table tbody tr[data-symbol]")
+                );
+                rows.forEach((row, idx) => {
+                    const symbol = normalize(row.getAttribute("data-symbol"));
+                    if (!symbol) return;
+                    const cells = row.querySelectorAll("td");
+                    if (!cells || cells.length < 4) return;
+                    const name = normalize(
+                        cells[0]?.querySelector("b")?.textContent
+                        || cells[0]?.querySelector("a")?.textContent
+                        || cells[0]?.textContent
+                    );
+                    const priceRaw = normalize(cells[1]?.textContent || "").replace(/,/g, "");
+                    const priceMatch = priceRaw.match(/([+-]?\\d+(?:\\.\\d+)?)/);
+                    const changeRaw = normalize(cells[3]?.textContent || "");
+                    allRows.push({
+                        row_index: idx,
+                        pair: symbol,
+                        common_name: name,
+                        price: priceMatch ? priceMatch[1] : priceRaw,
+                        change_text: changeRaw,
+                    });
+                });
+                return allRows;
+            }
+            """,
+        )
+
+        normalized = self._normalize_tradingeconomics_usd_index(raw_rows)
+        self._log_usd_index_filter_stats(raw_rows, normalized)
+        return normalized
+
+    @classmethod
+    def _normalize_tradingeconomics_usd_index(
+        cls,
+        rows: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Normalize US currency-index rows into payload format (DXY only)."""
+        all_rows = rows or []
+        seen_pairs: Dict[str, Dict[str, Any]] = {}
+
+        for row in all_rows:
+            raw_pair = str(row.get("pair") or "").strip().upper()
+            normalized_pair = DXY_SYMBOL_MAP.get(raw_pair)
+            if not normalized_pair:
+                continue
+
+            price = str(row.get("price") or "").strip()
+            common_name = str(row.get("common_name") or "").strip() or normalized_pair
+            change_text = str(row.get("change_text") or "").strip()
+            row_index = int(row.get("row_index") or 9999)
+            if not price:
+                continue
+
+            has_valid_price = bool(re.match(r"[+-]?\d+(?:\.\d+)?", price))
+            has_name = len(common_name) > 0
+            has_change = bool(re.search(r"[+-]?\d+(?:\.\d+)?", change_text.replace(",", "")))
+            quality_score = sum([has_valid_price, has_name, has_change])
+
+            change = None
+            change_match = re.search(
+                r"([+-]?\d+(?:\.\d+)?)",
+                change_text.replace(",", ""),
+            )
+            if change_match:
+                change = change_match.group(1)
+
+            normalized_row = {
+                "pair": normalized_pair,
+                "common_name": common_name,
+                "price": price,
+                "change": change,
+                "_row_index": row_index,
+                "_quality": quality_score,
+            }
+
+            existing = seen_pairs.get(normalized_pair)
+            if not existing:
+                seen_pairs[normalized_pair] = normalized_row
+                continue
+
+            existing_score = int(existing.get("_quality", -1))
+            existing_row_index = int(existing.get("_row_index", 9999))
+            if quality_score > existing_score or (
+                quality_score == existing_score and row_index < existing_row_index
+            ):
+                seen_pairs[normalized_pair] = normalized_row
+
+        return [
+            {k: v for k, v in row.items() if not k.startswith("_")}
+            for row in seen_pairs.values()
+        ]
+
+    def _log_usd_index_filter_stats(
+        self,
+        raw_rows: List[Dict[str, Any]],
+        normalized: List[Dict[str, Any]],
+    ) -> None:
+        raw_count = len(raw_rows or [])
+        kept_count = len(normalized or [])
+        if (
+            raw_count == self._last_raw_usd_index_count
+            and kept_count == self._last_kept_usd_index_count
+        ):
+            return
+        self._last_raw_usd_index_count = raw_count
+        self._last_kept_usd_index_count = kept_count
+        logger.info(
+            "[%s] USD-index filter: kept %d of %d raw rows (mapped symbols=%d)",
+            self.source_name,
+            kept_count,
+            raw_count,
+            len(DXY_SYMBOL_MAP),
         )
 
     def _log_commodity_filter_stats(

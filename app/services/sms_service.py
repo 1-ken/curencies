@@ -42,6 +42,7 @@ class SMSService:
                 f"{alert_type.upper()} ALERT",
                 f"PAIR: {pair}",
                 f"CONDITION: {condition_text}",
+                f"CURRENT: {current_price}",
                 f"TRIGGERED: {trigger_text}",
             ]
             if timeframe:
