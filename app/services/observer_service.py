@@ -27,6 +27,9 @@ logger = logging.getLogger(__name__)
 
 # Re-export the default allowlist for backward compatibility with older imports.
 ALLOWED_COMMODITY_SYMBOLS = DEFAULT_ALLOWED_COMMODITY_SYMBOLS
+BOND_SYMBOL_MAP: Dict[str, str] = {
+    "USGG10YR:IND": "US10Y",
+}
 
 
 class SiteObserver:
@@ -61,6 +64,8 @@ class SiteObserver:
         # downstream operators can spot upstream format changes quickly.
         self._last_raw_commodity_count: Optional[int] = None
         self._last_kept_commodity_count: Optional[int] = None
+        self._last_raw_bond_count: Optional[int] = None
+        self._last_kept_bond_count: Optional[int] = None
 
         self._pw = None
         self.browser: Optional[Browser] = None
@@ -341,7 +346,23 @@ class SiteObserver:
         if not self.page:
             raise RuntimeError("Page not initialized")
 
-        if self.source_name.lower() != "commodities":
+        source = self.source_name.lower()
+        if source == "bonds":
+            selectors = [
+                self.wait_selector,
+                "table[id^='bond-'] tbody tr[data-symbol]",
+                "table.table-heatmap tbody tr[data-symbol]",
+                "div.card table tbody tr[data-symbol]",
+            ]
+            for selector in selectors:
+                try:
+                    await self.page.wait_for_selector(selector, timeout=10000)
+                    return
+                except Exception:
+                    continue
+            raise TimeoutError("No bonds row selector became available")
+
+        if source != "commodities":
             await self.page.wait_for_selector(self.wait_selector, timeout=30000)
             return
 
@@ -364,7 +385,23 @@ class SiteObserver:
         if not self.page:
             raise RuntimeError("Page not initialized")
 
-        if self.source_name.lower() != "commodities":
+        source = self.source_name.lower()
+        if source == "bonds":
+            selectors = [
+                self.table_selector,
+                "table[id^='bond-']",
+                "table.table-heatmap",
+                "div.card table.table",
+            ]
+            for selector in selectors:
+                try:
+                    await self.page.wait_for_selector(selector, timeout=5000)
+                    return
+                except Exception:
+                    continue
+            raise TimeoutError("No bonds table selector became available")
+
+        if source != "commodities":
             await self.page.wait_for_selector(self.table_selector, timeout=10000)
             return
 
@@ -490,8 +527,11 @@ class SiteObserver:
         if not self.page:
             return []
 
-        if self.source_name.lower() == "commodities":
+        source = self.source_name.lower()
+        if source == "commodities":
             return await self._extract_tradingeconomics_commodities()
+        if source == "bonds":
+            return await self._extract_tradingeconomics_bonds()
 
         js = f"""
         (() => {{
@@ -653,6 +693,123 @@ class SiteObserver:
         )
         self._log_commodity_filter_stats(raw_rows, normalized)
         return normalized
+
+    async def _extract_tradingeconomics_bonds(self) -> List[Dict[str, Any]]:
+        """Extract and normalize bond rows from TradingEconomics bonds page."""
+        if not self.page:
+            return []
+
+        raw_rows: List[Dict[str, Any]] = await self.page.evaluate(
+            """
+            () => {
+                const normalize = (value) => (value || '').toString().trim();
+                const allRows = [];
+                const tables = Array.from(document.querySelectorAll("table[id^='bond-'], table.table-heatmap"))
+                    .filter((table) => table.querySelectorAll("tbody tr[data-symbol]").length > 0);
+                tables.forEach((table, tableIndex) => {
+                    const rows = Array.from(table.querySelectorAll("tbody tr[data-symbol]"));
+                    rows.forEach((row) => {
+                        const symbol = normalize(row.getAttribute("data-symbol"));
+                        if (!symbol) return;
+                        const cells = row.querySelectorAll("td");
+                        if (!cells || cells.length < 4) return;
+                        const commonName = normalize(
+                            cells[1]?.querySelector("b")?.textContent
+                            || cells[1]?.querySelector("a")?.textContent
+                            || cells[1]?.textContent
+                        );
+                        const priceRaw = normalize(cells[2]?.textContent || "").replace(/,/g, "");
+                        const priceMatch = priceRaw.match(/([+-]?\\d+(?:\\.\\d+)?)/);
+                        const changeRaw = normalize(cells[3]?.textContent || "");
+                        allRows.push({
+                            group: `bond-table-${tableIndex}`,
+                            pair: symbol,
+                            common_name: commonName,
+                            price: priceMatch ? priceMatch[1] : priceRaw,
+                            change_text: changeRaw,
+                        });
+                    });
+                });
+                return allRows;
+            }
+            """,
+        )
+
+        normalized = self._normalize_tradingeconomics_bonds(raw_rows)
+        self._log_bonds_filter_stats(raw_rows, normalized)
+        return normalized
+
+    @classmethod
+    def _normalize_tradingeconomics_bonds(
+        cls,
+        rows: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Normalize TradingEconomics bond rows into payload format."""
+        all_rows = rows or []
+        seen_pairs: Dict[str, Dict[str, Any]] = {}
+
+        for row in all_rows:
+            raw_pair = str(row.get("pair") or "").strip().upper()
+            normalized_pair = BOND_SYMBOL_MAP.get(raw_pair)
+            if not normalized_pair:
+                continue
+
+            price = str(row.get("price") or "").strip()
+            common_name = str(row.get("common_name") or "").strip()
+            change_text = str(row.get("change_text") or "").strip()
+            if not price:
+                continue
+
+            has_valid_price = bool(re.match(r"[+-]?\d+(?:\.\d+)?", price))
+            has_name = len(common_name) > 0
+            has_change = bool(re.search(r"[+-]?\d+(?:\.\d+)?", change_text.replace(",", "")))
+            quality_score = sum([has_valid_price, has_name, has_change])
+
+            change = None
+            change_match = re.search(
+                r"([+-]?\d+(?:\.\d+)?)",
+                change_text.replace(",", ""),
+            )
+            if change_match:
+                change = change_match.group(1)
+
+            normalized_row = {
+                "pair": normalized_pair,
+                "common_name": common_name,
+                "price": price,
+                "change": change,
+            }
+
+            if (
+                normalized_pair not in seen_pairs
+                or quality_score > seen_pairs[normalized_pair].get("_quality", -1)
+            ):
+                normalized_row["_quality"] = quality_score
+                seen_pairs[normalized_pair] = normalized_row
+
+        return [{k: v for k, v in row.items() if k != "_quality"} for row in seen_pairs.values()]
+
+    def _log_bonds_filter_stats(
+        self,
+        raw_rows: List[Dict[str, Any]],
+        normalized: List[Dict[str, Any]],
+    ) -> None:
+        raw_count = len(raw_rows or [])
+        kept_count = len(normalized or [])
+        if (
+            raw_count == self._last_raw_bond_count
+            and kept_count == self._last_kept_bond_count
+        ):
+            return
+        self._last_raw_bond_count = raw_count
+        self._last_kept_bond_count = kept_count
+        logger.info(
+            "[%s] Bonds filter: kept %d of %d raw rows (mapped symbols=%d)",
+            self.source_name,
+            kept_count,
+            raw_count,
+            len(BOND_SYMBOL_MAP),
+        )
 
     def _log_commodity_filter_stats(
         self,

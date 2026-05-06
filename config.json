@@ -20,6 +20,16 @@
       "filterByMajors": false,
       "allowedSymbols": ["CL1", "XAUUSD", "XAGUSD", "HG1"],
       "enabled": true
+    },
+    {
+      "name": "bonds",
+      "url": "https://tradingeconomics.com/bonds",
+      "waitSelector": "table[id^='bond-'] tbody tr[data-symbol]",
+      "tableSelector": "table[id^='bond-']",
+      "pairCellSelector": "tbody tr td.datatable-item-first b",
+      "injectMutationObserver": true,
+      "filterByMajors": false,
+      "enabled": true
     }
   ],
   "url": "https://finance.yahoo.com/markets/currencies/",

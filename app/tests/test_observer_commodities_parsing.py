@@ -287,5 +287,63 @@ class TradingEconomicsCommoditySelectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(observer.source_name, "commodities")
 
 
+class TradingEconomicsBondsParsingTests(unittest.TestCase):
+    def test_maps_usgg10yr_to_us10y(self):
+        rows = [
+            {
+                "pair": "USGG10YR:IND",
+                "common_name": "United States",
+                "price": "4.3660",
+                "change_text": "0.063",
+            },
+            {
+                "pair": "GUKG10:IND",
+                "common_name": "United Kingdom",
+                "price": "4.9450",
+                "change_text": "0.103",
+            },
+        ]
+
+        parsed = SiteObserver._normalize_tradingeconomics_bonds(rows)
+
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["pair"], "US10Y")
+        self.assertEqual(parsed[0]["common_name"], "United States")
+        self.assertEqual(parsed[0]["price"], "4.3660")
+        self.assertEqual(parsed[0]["change"], "0.063")
+
+    def test_skips_bond_rows_with_missing_price(self):
+        rows = [
+            {
+                "pair": "USGG10YR:IND",
+                "common_name": "United States",
+                "price": "",
+                "change_text": "0.063",
+            },
+        ]
+        parsed = SiteObserver._normalize_tradingeconomics_bonds(rows)
+        self.assertEqual(parsed, [])
+
+    def test_deduplicates_us10y_preferring_higher_quality(self):
+        rows = [
+            {
+                "pair": "USGG10YR:IND",
+                "common_name": "",
+                "price": "4.3660",
+                "change_text": "",
+            },
+            {
+                "pair": "USGG10YR:IND",
+                "common_name": "United States",
+                "price": "4.3660",
+                "change_text": "0.063",
+            },
+        ]
+        parsed = SiteObserver._normalize_tradingeconomics_bonds(rows)
+        self.assertEqual(len(parsed), 1)
+        self.assertEqual(parsed[0]["common_name"], "United States")
+        self.assertEqual(parsed[0]["change"], "0.063")
+
+
 if __name__ == "__main__":
     unittest.main()
