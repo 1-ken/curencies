@@ -11,6 +11,9 @@ class AlertRecord(Base):
     __tablename__ = "alerts"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        String(128), index=True, nullable=False, default="legacy-unassigned"
+    )
     pair: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
     status: Mapped[str] = mapped_column(String(16), index=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True, nullable=False)

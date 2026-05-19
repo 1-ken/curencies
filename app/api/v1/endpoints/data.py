@@ -6,9 +6,10 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
+from app.core.auth import get_current_user_id, verify_ws_access_token
 from app.services.observer_service import SiteObserver
 from app.services.alert_service import AlertManager
 from app.services.redis_service import RedisService
@@ -289,7 +290,7 @@ def set_notification_dispatch_config(
 
 
 @router.get("/snapshot", response_model=SnapshotResponse)
-async def snapshot():
+async def snapshot(_user_id: str = Depends(get_current_user_id)):
     """Get a single snapshot of current forex data.
     
     Returns clean data format with only essential fields:
@@ -363,7 +364,7 @@ async def snapshot():
 
 
 @router.get("/client-config", response_model=ClientConfigResponse)
-async def client_config():
+async def client_config(_user_id: str = Depends(get_current_user_id)):
     """Serve client runtime configuration derived from environment.
     Allows overriding WebSocket URL when running behind proxies or differing hosts.
     """
@@ -374,7 +375,7 @@ async def client_config():
 
 
 @router.get("/stream-health", response_model=StreamHealthResponse)
-async def stream_health():
+async def stream_health(_user_id: str = Depends(get_current_user_id)):
     """Expose stream freshness and resilience counters."""
     last_snapshot_age_seconds = None
     if last_snapshot_ts:
@@ -429,8 +430,17 @@ async def ws_observe(ws: WebSocket):
     Query params:
         interval: Optional candle timeframe (default: 1m)
         pair: Optional currency pair filter (default: all pairs)
+        access_token: NextAuth API JWT (required unless AUTH_DISABLED)
     """
     global _active_ws_connections
+
+    access_token = (ws.query_params.get("access_token") or "").strip()
+    try:
+        ws_user_id = verify_ws_access_token(access_token or None)
+    except Exception:
+        await ws.close(code=4401)
+        return
+
     await ws.accept()
     connection_counted = False
 
@@ -483,6 +493,7 @@ async def ws_observe(ws: WebSocket):
                     interval,
                     requested_pair,
                     include_alerts=not has_stream_params,
+                    user_id=ws_user_id,
                 )
                 await asyncio.wait_for(
                     ws.send_json(data),
@@ -509,6 +520,7 @@ async def ws_observe(ws: WebSocket):
                     interval,
                     requested_pair,
                     include_alerts=not has_stream_params,
+                    user_id=ws_user_id,
                 )
                 await asyncio.wait_for(
                     ws.send_json(data),
@@ -552,7 +564,7 @@ async def ws_observe(ws: WebSocket):
             pass
 
 
-def _attach_alerts(data: Dict[str, Any]) -> Dict[str, Any]:
+def _attach_alerts(data: Dict[str, Any], user_id: Optional[str] = None) -> Dict[str, Any]:
     """Clean and enrich snapshot data for WebSocket clients.
     
     Removes debug/metadata fields and adds market status indicator.
@@ -572,8 +584,23 @@ def _attach_alerts(data: Dict[str, Any]) -> Dict[str, Any]:
         },
         "ts": data.get("ts"),
         "alerts": {
-            "active": [a.to_dict() for a in alert_manager.get_active_alerts()],
-            "triggered": [a.to_dict() for a in alert_manager.get_all_alerts() if a.status == "triggered"],
+            "active": [
+                a.to_dict()
+                for a in (
+                    alert_manager.get_active_alerts_for_user(user_id)
+                    if user_id
+                    else alert_manager.get_active_alerts()
+                )
+            ],
+            "triggered": [
+                a.to_dict()
+                for a in (
+                    alert_manager.get_all_alerts_for_user(user_id)
+                    if user_id
+                    else alert_manager.get_all_alerts()
+                )
+                if a.status == "triggered"
+            ],
         }
     }
     return clean_data
@@ -666,9 +693,10 @@ async def _attach_stream_metadata(
     interval: str = "1m",
     pair: Optional[str] = None,
     include_alerts: bool = True,
+    user_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Attach WebSocket stream metadata while keeping the default broadcast payload."""
-    payload = _attach_alerts(data)
+    payload = _attach_alerts(data, user_id=user_id)
 
     if not include_alerts:
         payload.pop("alerts", None)
@@ -1245,6 +1273,7 @@ async def historical_data(
     end: Optional[str] = None,
     limit: int = 500,
     order: str = "desc",
+    _user_id: str = Depends(get_current_user_id),
 ):
     """Query historical data stored in PostgreSQL."""
     if not postgres_service:
@@ -1285,6 +1314,7 @@ async def historical_ohlc(
     start: Optional[str] = None,
     end: Optional[str] = None,
     limit: int = 1000,
+    _user_id: str = Depends(get_current_user_id),
 ):
     """Query OHLC candlestick data aggregated by time interval.
     
@@ -1360,6 +1390,7 @@ async def historical_stream_metrics(
     end: Optional[str] = None,
     limit: int = 1000,
     order: str = "desc",
+    _user_id: str = Depends(get_current_user_id),
 ):
     """Query persisted stream metrics (subscriber count, failures, stream status)."""
     if not postgres_service:
@@ -1402,6 +1433,7 @@ async def historical_ohlc_with_forming(
     start: Optional[str] = None,
     end: Optional[str] = None,
     limit: int = 1000,
+    _user_id: str = Depends(get_current_user_id),
 ):
     """Query OHLC candlestick data including the current forming candle.
     

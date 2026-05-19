@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 class Alert:
     """Alert configuration - supports both price and candle-close modes."""
     id: str
+    user_id: str
     pair: str
     status: str  # "active", "triggered", "disabled"
     created_at: str
@@ -45,6 +46,8 @@ class Alert:
         # Handle backward compatibility: old alerts without alert_type default to "price"
         if "alert_type" not in data:
             data["alert_type"] = "price"
+        if "user_id" not in data or not data.get("user_id"):
+            data["user_id"] = "legacy-unassigned"
         return Alert(**{k: v for k, v in data.items() if k in Alert.__dataclass_fields__})
 
 
@@ -93,6 +96,7 @@ class AlertManager:
         for row in rows:
             alert_obj = Alert(
                 id=row.id,
+                user_id=getattr(row, "user_id", None) or "legacy-unassigned",
                 pair=row.pair,
                 status=row.status,
                 created_at=row.created_at.isoformat(),
@@ -234,6 +238,7 @@ class AlertManager:
         pair: str,
         target_price: float,
         condition: str,
+        user_id: str = "test-user",
         email: str = "",
         channel: str = "email",
         phone: str = "",
@@ -249,6 +254,7 @@ class AlertManager:
         alert_id = str(uuid.uuid4())
         alert = Alert(
             id=alert_id,
+            user_id=user_id,
             pair=canonical,
             alert_type="price",
             target_price=target_price,
@@ -263,7 +269,7 @@ class AlertManager:
         self.alerts[alert_id] = alert
         self._rebuild_indexes()
         await self._persist_alert(alert)
-        logger.info(f"Created price alert {alert_id} for {canonical} at {target_price}")
+        logger.info(f"Created price alert {alert_id} for user {user_id} {canonical} at {target_price}")
         return alert
 
     async def create_candle_alert(
@@ -272,6 +278,7 @@ class AlertManager:
         interval: str,
         direction: str,
         threshold: float,
+        user_id: str = "test-user",
         email: str = "",
         channel: str = "email",
         phone: str = "",
@@ -289,6 +296,7 @@ class AlertManager:
         alert_id = str(uuid.uuid4())
         alert = Alert(
             id=alert_id,
+            user_id=user_id,
             pair=canonical,
             alert_type="candle_close",
             interval=normalized_interval,
@@ -305,7 +313,10 @@ class AlertManager:
         self.alerts[alert_id] = alert
         self._rebuild_indexes()
         await self._persist_alert(alert)
-        logger.info(f"Created candle-close alert {alert_id} for {canonical} {normalized_interval} {direction} {threshold}")
+        logger.info(
+            f"Created candle-close alert {alert_id} for user {user_id} "
+            f"{canonical} {normalized_interval} {direction} {threshold}"
+        )
         return alert
 
     def get_alert(self, alert_id: str) -> Optional[Alert]:
@@ -313,8 +324,12 @@ class AlertManager:
         return self.alerts.get(alert_id)
 
     def get_all_alerts(self) -> List[Alert]:
-        """Get all alerts."""
+        """Get all alerts (internal evaluation — not user-scoped)."""
         return list(self.alerts.values())
+
+    def get_all_alerts_for_user(self, user_id: str) -> List[Alert]:
+        """Get all alerts owned by a user."""
+        return [a for a in self.alerts.values() if a.user_id == user_id]
 
     def _sort_alerts_by_recency(self, alerts: List[Alert]) -> List[Alert]:
         """Sort alerts by created_at (desc) and id (desc) for stable recency ordering."""
@@ -335,8 +350,22 @@ class AlertManager:
         """Get active alerts ordered by most recent creation time."""
         return self._sort_alerts_by_recency(self.get_active_alerts())
 
-    async def delete_alert(self, alert_id: str) -> bool:
-        """Delete an alert."""
+    def get_active_alerts_for_user(self, user_id: str) -> List[Alert]:
+        """Get active alerts for a specific user."""
+        return [a for a in self.get_active_alerts() if a.user_id == user_id]
+
+    def get_active_alerts_sorted_for_user(self, user_id: str) -> List[Alert]:
+        """Get active alerts for a user ordered by recency."""
+        return self._sort_alerts_by_recency(self.get_active_alerts_for_user(user_id))
+
+    def is_alert_owned_by(self, alert_id: str, user_id: str) -> bool:
+        alert = self.get_alert(alert_id)
+        return alert is not None and alert.user_id == user_id
+
+    async def delete_alert(self, alert_id: str, user_id: Optional[str] = None) -> bool:
+        """Delete an alert. When user_id is set, only delete if owned by that user."""
+        if user_id is not None and not self.is_alert_owned_by(alert_id, user_id):
+            return False
         if alert_id in self.alerts:
             del self.alerts[alert_id]
             self._rebuild_indexes()
@@ -345,18 +374,23 @@ class AlertManager:
             return True
         return False
 
-    async def update_alert(self, alert_id: str, updates: Dict[str, Any]) -> Optional[Alert]:
+    async def update_alert(
+        self, alert_id: str, updates: Dict[str, Any], user_id: Optional[str] = None
+    ) -> Optional[Alert]:
         """Update an existing alert with new values.
         
         Args:
             alert_id: ID of alert to update
             updates: Dict of fields to update (target_price, condition, channel, email, phone, custom_message, status)
+            user_id: When set, only update if owned by this user
             
         Returns:
             Updated Alert object or None if not found
         """
         alert = self.get_alert(alert_id)
         if not alert:
+            return None
+        if user_id is not None and alert.user_id != user_id:
             return None
         
         # For price alerts

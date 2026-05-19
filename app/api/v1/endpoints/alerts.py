@@ -1,18 +1,19 @@
 """Alert management endpoints."""
 import logging
-from fastapi import APIRouter, HTTPException
-from fastapi.responses import JSONResponse
 from typing import Union
 
+from fastapi import APIRouter, Depends, HTTPException
+
+from app.core.auth import get_current_user_id
 from app.schemas.alert import (
-    CreateAlertRequest, 
+    CreateAlertRequest,
     UpdateAlertRequest,
     CreateCandleAlertRequest,
     UpdateCandleAlertRequest,
     AlertResponse,
     AlertListResponse,
     CreateUpdateAlertResponse,
-    DeleteAlertResponse
+    DeleteAlertResponse,
 )
 from app.services.alert_service import AlertManager
 
@@ -24,7 +25,6 @@ router = APIRouter(
     responses={404: {"description": "Not found"}},
 )
 
-# Global alert manager instance
 alert_manager: AlertManager = None
 
 
@@ -35,31 +35,25 @@ def set_alert_manager(manager: AlertManager):
 
 
 @router.post("", response_model=CreateUpdateAlertResponse)
-async def create_alert(request: Union[CreateAlertRequest, CreateCandleAlertRequest]):
-    """Create a new alert (price-based or candle-close).
-    
-    Request body can be either:
-    - CreateAlertRequest for price-based alerts (alert_type="price" or omitted)
-    - CreateCandleAlertRequest for candle-close alerts (alert_type="candle_close")
-    """
-    # Validate pair format first
+async def create_alert(
+    request: Union[CreateAlertRequest, CreateCandleAlertRequest],
+    user_id: str = Depends(get_current_user_id),
+):
+    """Create a new alert (price-based or candle-close)."""
     pair = request.pair.strip()
     if not pair:
         raise HTTPException(status_code=400, detail="Pair name cannot be empty")
-    
-    # Validate commodity pair format if it contains a colon
-    if ':' in pair:
-        parts = pair.split(':')
+
+    if ":" in pair:
+        parts = pair.split(":")
         if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
             raise HTTPException(
                 status_code=400,
-                detail="Commodity pair must be in format 'SYMBOL:TYPE' (e.g., 'XAUUSD:CUR', 'HG1:COM')"
+                detail="Commodity pair must be in format 'SYMBOL:TYPE' (e.g., 'XAUUSD:CUR', 'HG1:COM')",
             )
-    
-    # Try to parse as candle alert first (has 'interval' field)
-    if hasattr(request, 'interval') and request.interval:
+
+    if hasattr(request, "interval") and request.interval:
         request.interval = request.interval.strip().lower()
-        # Candle-close alert
         if request.channel not in ["email", "sms", "call"]:
             raise HTTPException(status_code=400, detail="Channel must be 'email', 'sms', or 'call'")
         if request.channel == "email" and not request.email:
@@ -68,105 +62,106 @@ async def create_alert(request: Union[CreateAlertRequest, CreateCandleAlertReque
             raise HTTPException(status_code=400, detail="Phone is required for SMS alerts")
         if request.channel == "call" and not request.phone:
             raise HTTPException(status_code=400, detail="Phone is required for call alerts")
-        
+
         if request.direction not in ["above", "below"]:
             raise HTTPException(status_code=400, detail="Direction must be 'above' or 'below'")
-        
+
         valid_intervals = ["1m", "5m", "15m", "30m", "1h", "4h", "1d"]
         if request.interval not in valid_intervals:
-            raise HTTPException(status_code=400, detail=f"Interval must be one of: {', '.join(valid_intervals)}")
-        
+            raise HTTPException(
+                status_code=400,
+                detail=f"Interval must be one of: {', '.join(valid_intervals)}",
+            )
+
         try:
             alert = await alert_manager.create_candle_alert(
                 pair=request.pair,
                 interval=request.interval,
                 direction=request.direction,
                 threshold=request.threshold,
+                user_id=user_id,
                 email=request.email,
                 channel=request.channel,
                 phone=request.phone,
                 custom_message=request.custom_message,
             )
         except ValueError as e:
-            raise HTTPException(status_code=400, detail=str(e))
+            raise HTTPException(status_code=400, detail=str(e)) from e
         return {"success": True, "alert": alert.to_dict()}
-    else:
-        # Price-based alert (legacy)
-        if request.condition not in ["above", "below", "equal"]:
-            raise HTTPException(status_code=400, detail="Condition must be 'above', 'below', or 'equal'")
-        
-        if request.channel not in ["email", "sms", "call"]:
-            raise HTTPException(status_code=400, detail="Channel must be 'email', 'sms', or 'call'")
-        if request.channel == "email" and not request.email:
-            raise HTTPException(status_code=400, detail="Email is required for email alerts")
-        if request.channel == "sms" and not request.phone:
-            raise HTTPException(status_code=400, detail="Phone is required for SMS alerts")
-        if request.channel == "call" and not request.phone:
-            raise HTTPException(status_code=400, detail="Phone is required for call alerts")
 
-        alert = await alert_manager.create_alert(
-            pair=request.pair,
-            target_price=request.target_price,
-            condition=request.condition,
-            email=request.email,
-            channel=request.channel,
-            phone=request.phone,
-            custom_message=request.custom_message,
-        )
-        return {"success": True, "alert": alert.to_dict()}
+    if request.condition not in ["above", "below", "equal"]:
+        raise HTTPException(status_code=400, detail="Condition must be 'above', 'below', or 'equal'")
+
+    if request.channel not in ["email", "sms", "call"]:
+        raise HTTPException(status_code=400, detail="Channel must be 'email', 'sms', or 'call'")
+    if request.channel == "email" and not request.email:
+        raise HTTPException(status_code=400, detail="Email is required for email alerts")
+    if request.channel == "sms" and not request.phone:
+        raise HTTPException(status_code=400, detail="Phone is required for SMS alerts")
+    if request.channel == "call" and not request.phone:
+        raise HTTPException(status_code=400, detail="Phone is required for call alerts")
+
+    alert = await alert_manager.create_alert(
+        pair=request.pair,
+        target_price=request.target_price,
+        condition=request.condition,
+        user_id=user_id,
+        email=request.email,
+        channel=request.channel,
+        phone=request.phone,
+        custom_message=request.custom_message,
+    )
+    return {"success": True, "alert": alert.to_dict()}
 
 
 @router.get("", response_model=AlertListResponse)
-async def get_alerts():
-    """Get all alerts."""
-    all_alerts = alert_manager.get_all_alerts()
+async def get_alerts(user_id: str = Depends(get_current_user_id)):
+    """Get alerts for the authenticated user."""
+    all_alerts = alert_manager.get_all_alerts_for_user(user_id)
     return {
         "total": len(all_alerts),
-        "active": [a.to_dict() for a in alert_manager.get_active_alerts_sorted()],
+        "active": [a.to_dict() for a in alert_manager.get_active_alerts_sorted_for_user(user_id)],
         "triggered": [a.to_dict() for a in all_alerts if a.status == "triggered"],
         "all": [a.to_dict() for a in all_alerts],
     }
 
 
 @router.get("/{alert_id}", response_model=AlertResponse)
-async def get_alert(alert_id: str):
-    """Get specific alert."""
-    alert = alert_manager.get_alert(alert_id)
-    if not alert:
+async def get_alert(alert_id: str, user_id: str = Depends(get_current_user_id)):
+    """Get a specific alert owned by the user."""
+    if not alert_manager.is_alert_owned_by(alert_id, user_id):
         raise HTTPException(status_code=404, detail="Alert not found")
+    alert = alert_manager.get_alert(alert_id)
     return alert.to_dict()
 
 
 @router.delete("/{alert_id}", response_model=DeleteAlertResponse)
-async def delete_alert(alert_id: str):
-    """Delete an alert."""
-    if await alert_manager.delete_alert(alert_id):
+async def delete_alert(alert_id: str, user_id: str = Depends(get_current_user_id)):
+    """Delete an alert owned by the user."""
+    if await alert_manager.delete_alert(alert_id, user_id=user_id):
         return {"success": True, "message": "Alert deleted"}
     raise HTTPException(status_code=404, detail="Alert not found")
 
 
 @router.put("/{alert_id}", response_model=CreateUpdateAlertResponse)
-async def update_alert(alert_id: str, request: Union[UpdateAlertRequest, UpdateCandleAlertRequest]):
-    """Update an existing alert (price-based or candle-close).
-    
-    Supports partial updates - only include fields you want to change.
-    """
+async def update_alert(
+    alert_id: str,
+    request: Union[UpdateAlertRequest, UpdateCandleAlertRequest],
+    user_id: str = Depends(get_current_user_id),
+):
+    """Update an existing alert owned by the user."""
     alert = alert_manager.get_alert(alert_id)
-    if not alert:
+    if not alert or alert.user_id != user_id:
         raise HTTPException(status_code=404, detail="Alert not found")
-    
-    # Prepare updates dict from request
+
     updates = request.model_dump(exclude_unset=True)
-    
-    # Validate updates based on alert type
+    updates.pop("user_id", None)
+
     if alert.alert_type == "price":
-        # Price alert validation
         if "condition" in updates and updates["condition"] not in ["above", "below", "equal"]:
             raise HTTPException(status_code=400, detail="Condition must be 'above', 'below', or 'equal'")
-        
         if "channel" in updates and updates["channel"] not in ["email", "sms", "call"]:
             raise HTTPException(status_code=400, detail="Channel must be 'email', 'sms', or 'call'")
-        
         if updates.get("channel") == "email" and not updates.get("email"):
             if not alert.email and not updates.get("email"):
                 raise HTTPException(status_code=400, detail="Email is required for email alerts")
@@ -176,18 +171,14 @@ async def update_alert(alert_id: str, request: Union[UpdateAlertRequest, UpdateC
         if updates.get("channel") == "call" and not updates.get("phone"):
             if not alert.phone and not updates.get("phone"):
                 raise HTTPException(status_code=400, detail="Phone is required for call alerts")
-        
         if "status" in updates and updates["status"] not in ["active", "triggered", "disabled"]:
             raise HTTPException(status_code=400, detail="Status must be 'active', 'triggered', or 'disabled'")
-    
+
     elif alert.alert_type == "candle_close":
-        # Candle alert validation
         if "direction" in updates and updates["direction"] not in ["above", "below"]:
             raise HTTPException(status_code=400, detail="Direction must be 'above' or 'below'")
-        
         if "channel" in updates and updates["channel"] not in ["email", "sms", "call"]:
             raise HTTPException(status_code=400, detail="Channel must be 'email', 'sms', or 'call'")
-        
         if updates.get("channel") == "email" and not updates.get("email"):
             if not alert.email and not updates.get("email"):
                 raise HTTPException(status_code=400, detail="Email is required for email alerts")
@@ -197,13 +188,11 @@ async def update_alert(alert_id: str, request: Union[UpdateAlertRequest, UpdateC
         if updates.get("channel") == "call" and not updates.get("phone"):
             if not alert.phone and not updates.get("phone"):
                 raise HTTPException(status_code=400, detail="Phone is required for call alerts")
-        
         if "status" in updates and updates["status"] not in ["active", "triggered", "disabled"]:
             raise HTTPException(status_code=400, detail="Status must be 'active', 'triggered', or 'disabled'")
-    
-    # Perform update
-    updated_alert = await alert_manager.update_alert(alert_id, updates)
+
+    updated_alert = await alert_manager.update_alert(alert_id, updates, user_id=user_id)
     if not updated_alert:
         raise HTTPException(status_code=404, detail="Alert not found")
-    
+
     return {"success": True, "alert": updated_alert.to_dict()}

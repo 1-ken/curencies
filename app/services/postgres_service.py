@@ -215,6 +215,7 @@ class PostgresService:
                 existing = AlertRecord(id=alert_id)
                 session.add(existing)
 
+            existing.user_id = str(payload.get("user_id") or "legacy-unassigned")
             existing.pair = str(payload.get("pair") or "")
             existing.status = str(payload.get("status") or "active")
             existing.created_at = self._parse_datetime(payload.get("created_at")) or datetime.now(
