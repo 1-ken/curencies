@@ -9,6 +9,7 @@ from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
+from app.db.migrations import run_pending_sql_migrations
 from app.models import AlertRecord, Base, HistoricalPrice, StreamMetric, User, UserState
 from app.utils.pair_normalizer import (
     PROVIDER_SUFFIXES,
@@ -44,34 +45,7 @@ class PostgresService:
             raise RuntimeError("PostgreSQL engine not initialized")
         async with self._engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
-            alert_user_id_exists = await conn.scalar(
-                text(
-                    """
-                    SELECT 1
-                    FROM information_schema.columns
-                    WHERE table_schema = 'public'
-                      AND table_name = 'alerts'
-                      AND column_name = 'user_id'
-                    """
-                )
-            )
-            if not alert_user_id_exists:
-                await conn.execute(
-                    text("ALTER TABLE alerts ADD COLUMN user_id VARCHAR(128)")
-                )
-                logger.info("Migrated alerts table by adding missing user_id column")
-            await conn.execute(
-                text(
-                    "UPDATE alerts SET user_id = 'legacy-unassigned' WHERE user_id IS NULL"
-                )
-            )
-            await conn.execute(
-                text(
-                    "ALTER TABLE alerts ALTER COLUMN user_id SET DEFAULT 'legacy-unassigned'"
-                )
-            )
-            await conn.execute(text("ALTER TABLE alerts ALTER COLUMN user_id SET NOT NULL"))
-            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_alerts_user_id ON alerts(user_id)"))
+            await run_pending_sql_migrations(conn)
             current_pair_length = await conn.scalar(
                 text(
                     """
