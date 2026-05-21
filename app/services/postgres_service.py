@@ -9,7 +9,7 @@ from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
-from app.models import AlertRecord, Base, HistoricalPrice, StreamMetric
+from app.models import AlertRecord, Base, HistoricalPrice, StreamMetric, User, UserState
 from app.utils.pair_normalizer import (
     PROVIDER_SUFFIXES,
     canonical_pair,
@@ -44,6 +44,34 @@ class PostgresService:
             raise RuntimeError("PostgreSQL engine not initialized")
         async with self._engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+            alert_user_id_exists = await conn.scalar(
+                text(
+                    """
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = 'public'
+                      AND table_name = 'alerts'
+                      AND column_name = 'user_id'
+                    """
+                )
+            )
+            if not alert_user_id_exists:
+                await conn.execute(
+                    text("ALTER TABLE alerts ADD COLUMN user_id VARCHAR(128)")
+                )
+                logger.info("Migrated alerts table by adding missing user_id column")
+            await conn.execute(
+                text(
+                    "UPDATE alerts SET user_id = 'legacy-unassigned' WHERE user_id IS NULL"
+                )
+            )
+            await conn.execute(
+                text(
+                    "ALTER TABLE alerts ALTER COLUMN user_id SET DEFAULT 'legacy-unassigned'"
+                )
+            )
+            await conn.execute(text("ALTER TABLE alerts ALTER COLUMN user_id SET NOT NULL"))
+            await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_alerts_user_id ON alerts(user_id)"))
             current_pair_length = await conn.scalar(
                 text(
                     """
@@ -258,6 +286,52 @@ class PostgresService:
         async with self._sessionmaker() as session:
             result = await session.execute(stmt)
             return list(result.scalars().all())
+
+    async def get_or_create_user_state(self, user_id: str) -> UserState:
+        if not self._sessionmaker:
+            raise RuntimeError("PostgreSQL session not initialized")
+
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_user_id:
+            raise ValueError("User id is required")
+
+        async with self._sessionmaker() as session:
+            row = await session.get(UserState, normalized_user_id)
+            if row is None:
+                row = UserState(
+                    user_id=normalized_user_id,
+                    first_seen_at=datetime.now(timezone.utc),
+                    onboarding_completed_at=None,
+                )
+                session.add(row)
+                await session.commit()
+                await session.refresh(row)
+            return row
+
+    async def complete_user_onboarding(self, user_id: str) -> UserState:
+        if not self._sessionmaker:
+            raise RuntimeError("PostgreSQL session not initialized")
+
+        normalized_user_id = str(user_id or "").strip()
+        if not normalized_user_id:
+            raise ValueError("User id is required")
+
+        async with self._sessionmaker() as session:
+            row = await session.get(UserState, normalized_user_id)
+            now = datetime.now(timezone.utc)
+            if row is None:
+                row = UserState(
+                    user_id=normalized_user_id,
+                    first_seen_at=now,
+                    onboarding_completed_at=now,
+                )
+                session.add(row)
+            else:
+                if row.onboarding_completed_at is None:
+                    row.onboarding_completed_at = now
+            await session.commit()
+            await session.refresh(row)
+            return row
 
     async def query_stream_metrics(
         self,

@@ -29,6 +29,45 @@ Edit `config.json`:
 Health endpoint:
 - `GET /stream-health`: Returns stream freshness (`last_snapshot_age_seconds`), subscriber count, and failure counters.
 
+## Frontend bootstrap and onboarding
+The backend now exposes a first-run bootstrap contract for authenticated clients:
+
+- `GET /me`: Returns the current user’s onboarding state and runtime bootstrap data.
+- `POST /onboarding/complete`: Marks onboarding as complete for that user.
+
+### `GET /me` response fields
+The frontend should consume these fields:
+
+- `userId`: Stable authenticated user id.
+- `isFirstTimeUser`: `true` when the user has never completed onboarding.
+- `onboardingCompletedAt`: Timestamp if onboarding is already done, otherwise `null`.
+- `authRequired`: Whether the frontend should attach a bearer token.
+- `wsUrl`: WebSocket URL for the observer stream.
+- `apiBaseUrl`: Optional backend base URL if the frontend needs to build absolute links.
+
+### Database requirement
+Onboarding state is stored in PostgreSQL (`user_states` table). The table is created automatically on startup via `init_models()` when Postgres connects.
+
+- Set `DATABASE_URL` (or `postgresDsn` in `config.json`) before starting the API.
+- On successful startup, logs should include `PostgreSQL schema ensured` and must not show `PostgreSQL unavailable`.
+- If Postgres is down, `GET /me` still returns a degraded first-time-user payload, but `POST /onboarding/complete` returns **503** with `{"detail":"Database unavailable"}`.
+
+Restart the API after changing database configuration.
+
+### Frontend behavior
+1. After login, call `GET /me` first.
+2. If `isFirstTimeUser` is `true`, show onboarding instead of the dashboard.
+3. When onboarding is finished, call `POST /onboarding/complete`.
+4. After completion, re-fetch `GET /me` and continue to the dashboard.
+5. For protected observer routes, send:
+   - `Authorization: Bearer <token>` for HTTP requests
+   - `access_token=<token>` for `/ws/observe`
+
+### Example request headers
+```http
+Authorization: Bearer eyJhbGciOi...
+```
+
 Alert provider environment variables (SendGrid, Africa's Talking, Twilio) are listed in `DEPLOYMENT.md`.
 
 Notes on selectors:

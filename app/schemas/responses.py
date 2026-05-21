@@ -65,3 +65,19 @@ class SnapshotResponse(BaseModel):
     market_status: str
     pairs: PairsGrouped
     ts: str
+
+
+class UserBootstrapResponse(BaseModel):
+    userId: str
+    isFirstTimeUser: bool
+    onboardingCompletedAt: Optional[datetime] = None
+    authRequired: bool
+    wsUrl: str
+    apiBaseUrl: Optional[str] = None
+
+
+class OnboardingCompleteResponse(BaseModel):
+    success: bool
+    userId: str
+    onboardingCompletedAt: datetime
+    isFirstTimeUser: bool

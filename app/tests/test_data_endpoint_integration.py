@@ -3,6 +3,8 @@ import json
 import unittest
 from datetime import datetime, timedelta, timezone
 
+from fastapi import HTTPException
+
 from app.api.v1.endpoints import data
 
 
@@ -70,6 +72,34 @@ class _BucketPriceRow:
 class _StreamOHLCPostgresService:
     async def query_history(self, pair, start, end, limit, descending):
         return [_BucketPriceRow(1.1), _BucketPriceRow(1.12), _BucketPriceRow(1.11)]
+
+
+class _UserStateRow:
+    def __init__(
+        self,
+        user_id: str,
+        onboarding_completed_at: datetime | None = None,
+    ):
+        self.user_id = user_id
+        self.onboarding_completed_at = onboarding_completed_at
+
+
+class _OnboardingPostgresService:
+    def __init__(self, onboarding_completed_at: datetime | None = None):
+        self._onboarding_completed_at = onboarding_completed_at
+
+    async def get_or_create_user_state(self, user_id: str):
+        return _UserStateRow(
+            user_id=user_id,
+            onboarding_completed_at=self._onboarding_completed_at,
+        )
+
+    async def complete_user_onboarding(self, user_id: str):
+        completed_at = datetime.now(timezone.utc)
+        return _UserStateRow(
+            user_id=user_id,
+            onboarding_completed_at=completed_at,
+        )
 
 
 class _HistoryPostgresService:
@@ -231,6 +261,46 @@ class DataEndpointIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(ohlc)
         self.assertIn("expected_open", ohlc)
         self.assertIn("expected_close", ohlc)
+
+    async def test_complete_onboarding_without_postgres_returns_503(self):
+        data.postgres_service = None
+
+        with self.assertRaises(HTTPException) as ctx:
+            await data.complete_onboarding(user_id="user-1")
+
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertEqual(ctx.exception.detail, "Database unavailable")
+
+    async def test_complete_onboarding_with_postgres_returns_response(self):
+        data.postgres_service = _OnboardingPostgresService()
+
+        response = await data.complete_onboarding(user_id="user-1")
+
+        self.assertTrue(response.success)
+        self.assertEqual(response.userId, "user-1")
+        self.assertIsNotNone(response.onboardingCompletedAt)
+        self.assertFalse(response.isFirstTimeUser)
+
+    async def test_get_me_without_postgres_degrades_to_first_time_user(self):
+        data.postgres_service = None
+
+        response = await data.get_me(user_id="user-1")
+
+        self.assertEqual(response.userId, "user-1")
+        self.assertTrue(response.isFirstTimeUser)
+        self.assertIsNone(response.onboardingCompletedAt)
+
+    async def test_get_me_with_postgres_reflects_onboarding_state(self):
+        completed_at = datetime(2026, 4, 1, 12, 0, tzinfo=timezone.utc)
+        data.postgres_service = _OnboardingPostgresService(
+            onboarding_completed_at=completed_at,
+        )
+
+        response = await data.get_me(user_id="user-1")
+
+        self.assertEqual(response.userId, "user-1")
+        self.assertFalse(response.isFirstTimeUser)
+        self.assertEqual(response.onboardingCompletedAt, completed_at)
 
 
 if __name__ == "__main__":

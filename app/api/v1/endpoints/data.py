@@ -6,17 +6,24 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
 from app.core.auth import get_current_user_id, verify_ws_access_token
+from app.core.config import AUTH_DISABLED
 from app.services.observer_service import SiteObserver
 from app.services.alert_service import AlertManager
 from app.services.redis_service import RedisService
 from app.services.postgres_service import PostgresService
 from app.utils.forex_market_hours import is_forex_market_open, get_time_until_market_opens
 from app.utils.pair_normalizer import canonical_pair
-from app.schemas.responses import SnapshotResponse, ClientConfigResponse, StreamHealthResponse
+from app.schemas.responses import (
+    SnapshotResponse,
+    ClientConfigResponse,
+    StreamHealthResponse,
+    UserBootstrapResponse,
+    OnboardingCompleteResponse,
+)
 from app.schemas.history import HistoricalQueryResponse, StreamMetricsResponse
 from app.schemas.ohlc import OHLCResponse, OHLCWithFormingResponse
 
@@ -368,10 +375,59 @@ async def client_config(_user_id: str = Depends(get_current_user_id)):
     """Serve client runtime configuration derived from environment.
     Allows overriding WebSocket URL when running behind proxies or differing hosts.
     """
-    ws_url = os.getenv("WS_URL", "")
+    ws_url = os.getenv("WS_URL", "").strip() or "ws://127.0.0.1:8000/ws/observe"
     return JSONResponse({
         "wsUrl": ws_url,  # e.g., "wss://your-domain/ws/observe" or "ws://ip:8000/ws/observe"
     })
+
+
+@router.get("/me", response_model=UserBootstrapResponse)
+async def get_me(user_id: str = Depends(get_current_user_id)):
+    """Return frontend bootstrap state for the authenticated user."""
+    if not postgres_service:
+        return UserBootstrapResponse(
+            userId=user_id,
+            isFirstTimeUser=True,
+            onboardingCompletedAt=None,
+            authRequired=not AUTH_DISABLED,
+            wsUrl=os.getenv("WS_URL", "").strip() or "ws://127.0.0.1:8000/ws/observe",
+            apiBaseUrl=os.getenv("API_BASE_URL"),
+        )
+
+    user_state = await postgres_service.get_or_create_user_state(user_id)
+    is_first_time_user = user_state.onboarding_completed_at is None
+
+    return UserBootstrapResponse(
+        userId=user_state.user_id,
+        isFirstTimeUser=is_first_time_user,
+        onboardingCompletedAt=user_state.onboarding_completed_at,
+        authRequired=not AUTH_DISABLED,
+        wsUrl=os.getenv("WS_URL", "").strip() or "ws://127.0.0.1:8000/ws/observe",
+        apiBaseUrl=os.getenv("API_BASE_URL"),
+    )
+
+
+@router.post("/onboarding/complete", response_model=OnboardingCompleteResponse)
+async def complete_onboarding(user_id: str = Depends(get_current_user_id)):
+    """Mark onboarding as completed for the authenticated user."""
+    if not postgres_service:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    try:
+        user_state = await postgres_service.complete_user_onboarding(user_id)
+    except (RuntimeError, ValueError) as exc:
+        logger.warning("Onboarding completion failed for user %s: %s", user_id, exc)
+        raise HTTPException(status_code=503, detail="Database unavailable") from exc
+
+    if user_state.onboarding_completed_at is None:
+        raise HTTPException(status_code=503, detail="Database unavailable")
+
+    return OnboardingCompleteResponse(
+        success=True,
+        userId=user_state.user_id,
+        onboardingCompletedAt=user_state.onboarding_completed_at,
+        isFirstTimeUser=False,
+    )
 
 
 @router.get("/stream-health", response_model=StreamHealthResponse)
@@ -990,7 +1046,9 @@ async def alert_monitoring_task():
                 retries = int(job.get("retries", 0))
                 alert = job.get("alert", {})
                 sent = False
-                if channel == "sms" and sms_service and alert.get("phone"):
+                if channel == "sound":
+                    sent = True
+                elif channel == "sms" and sms_service and alert.get("phone"):
                     sent = await _run_alert_action(
                         sms_service.send_price_alert,
                         to_phone=alert["phone"],

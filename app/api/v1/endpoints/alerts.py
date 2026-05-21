@@ -5,6 +5,11 @@ from typing import Union
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.auth import get_current_user_id
+from app.core.channels import (
+    channel_requires_email,
+    channel_requires_phone,
+    validate_alert_channel,
+)
 from app.schemas.alert import (
     CreateAlertRequest,
     UpdateAlertRequest,
@@ -26,6 +31,30 @@ router = APIRouter(
 )
 
 alert_manager: AlertManager = None
+
+
+def _validate_channel_fields(channel: str, email: str, phone: str) -> None:
+    try:
+        validate_alert_channel(channel)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if channel_requires_email(channel) and not email:
+        raise HTTPException(status_code=400, detail="Email is required for email alerts")
+    if channel_requires_phone(channel) and not phone:
+        detail = "Phone is required for SMS alerts" if channel == "sms" else "Phone is required for call alerts"
+        raise HTTPException(status_code=400, detail=detail)
+
+
+def _validate_channel_update(channel: str, email: str | None, phone: str | None, alert) -> None:
+    try:
+        validate_alert_channel(channel)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if channel_requires_email(channel) and not (email or alert.email):
+        raise HTTPException(status_code=400, detail="Email is required for email alerts")
+    if channel_requires_phone(channel) and not (phone or alert.phone):
+        detail = "Phone is required for SMS alerts" if channel == "sms" else "Phone is required for call alerts"
+        raise HTTPException(status_code=400, detail=detail)
 
 
 def set_alert_manager(manager: AlertManager):
@@ -54,14 +83,7 @@ async def create_alert(
 
     if hasattr(request, "interval") and request.interval:
         request.interval = request.interval.strip().lower()
-        if request.channel not in ["email", "sms", "call"]:
-            raise HTTPException(status_code=400, detail="Channel must be 'email', 'sms', or 'call'")
-        if request.channel == "email" and not request.email:
-            raise HTTPException(status_code=400, detail="Email is required for email alerts")
-        if request.channel == "sms" and not request.phone:
-            raise HTTPException(status_code=400, detail="Phone is required for SMS alerts")
-        if request.channel == "call" and not request.phone:
-            raise HTTPException(status_code=400, detail="Phone is required for call alerts")
+        _validate_channel_fields(request.channel, request.email, request.phone)
 
         if request.direction not in ["above", "below"]:
             raise HTTPException(status_code=400, detail="Direction must be 'above' or 'below'")
@@ -92,14 +114,7 @@ async def create_alert(
     if request.condition not in ["above", "below", "equal"]:
         raise HTTPException(status_code=400, detail="Condition must be 'above', 'below', or 'equal'")
 
-    if request.channel not in ["email", "sms", "call"]:
-        raise HTTPException(status_code=400, detail="Channel must be 'email', 'sms', or 'call'")
-    if request.channel == "email" and not request.email:
-        raise HTTPException(status_code=400, detail="Email is required for email alerts")
-    if request.channel == "sms" and not request.phone:
-        raise HTTPException(status_code=400, detail="Phone is required for SMS alerts")
-    if request.channel == "call" and not request.phone:
-        raise HTTPException(status_code=400, detail="Phone is required for call alerts")
+    _validate_channel_fields(request.channel, request.email, request.phone)
 
     alert = await alert_manager.create_alert(
         pair=request.pair,
@@ -160,34 +175,26 @@ async def update_alert(
     if alert.alert_type == "price":
         if "condition" in updates and updates["condition"] not in ["above", "below", "equal"]:
             raise HTTPException(status_code=400, detail="Condition must be 'above', 'below', or 'equal'")
-        if "channel" in updates and updates["channel"] not in ["email", "sms", "call"]:
-            raise HTTPException(status_code=400, detail="Channel must be 'email', 'sms', or 'call'")
-        if updates.get("channel") == "email" and not updates.get("email"):
-            if not alert.email and not updates.get("email"):
-                raise HTTPException(status_code=400, detail="Email is required for email alerts")
-        if updates.get("channel") == "sms" and not updates.get("phone"):
-            if not alert.phone and not updates.get("phone"):
-                raise HTTPException(status_code=400, detail="Phone is required for SMS alerts")
-        if updates.get("channel") == "call" and not updates.get("phone"):
-            if not alert.phone and not updates.get("phone"):
-                raise HTTPException(status_code=400, detail="Phone is required for call alerts")
+        if "channel" in updates:
+            _validate_channel_update(
+                updates["channel"],
+                updates.get("email"),
+                updates.get("phone"),
+                alert,
+            )
         if "status" in updates and updates["status"] not in ["active", "triggered", "disabled"]:
             raise HTTPException(status_code=400, detail="Status must be 'active', 'triggered', or 'disabled'")
 
     elif alert.alert_type == "candle_close":
         if "direction" in updates and updates["direction"] not in ["above", "below"]:
             raise HTTPException(status_code=400, detail="Direction must be 'above' or 'below'")
-        if "channel" in updates and updates["channel"] not in ["email", "sms", "call"]:
-            raise HTTPException(status_code=400, detail="Channel must be 'email', 'sms', or 'call'")
-        if updates.get("channel") == "email" and not updates.get("email"):
-            if not alert.email and not updates.get("email"):
-                raise HTTPException(status_code=400, detail="Email is required for email alerts")
-        if updates.get("channel") == "sms" and not updates.get("phone"):
-            if not alert.phone and not updates.get("phone"):
-                raise HTTPException(status_code=400, detail="Phone is required for SMS alerts")
-        if updates.get("channel") == "call" and not updates.get("phone"):
-            if not alert.phone and not updates.get("phone"):
-                raise HTTPException(status_code=400, detail="Phone is required for call alerts")
+        if "channel" in updates:
+            _validate_channel_update(
+                updates["channel"],
+                updates.get("email"),
+                updates.get("phone"),
+                alert,
+            )
         if "status" in updates and updates["status"] not in ["active", "triggered", "disabled"]:
             raise HTTPException(status_code=400, detail="Status must be 'active', 'triggered', or 'disabled'")
 

@@ -6,6 +6,10 @@ import time
 from datetime import datetime, timezone
 
 from dotenv import load_dotenv
+
+# Load environment variables from .env file before importing app modules
+load_dotenv()
+
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import text
@@ -17,11 +21,10 @@ from app.services.postgres_service import PostgresService
 from app.services.redis_service import RedisService
 from app.api.v1 import api as api_v1
 from app.api.v1.endpoints import alerts as alerts_endpoints
+from app.api.v1.endpoints import auth as auth_endpoints
 from app.api.v1.endpoints import data as data_endpoints
+from app.services.user_auth_service import UserAuthService
 from app.schemas.responses import HealthResponse, PingResponse
-
-# Load environment variables from .env file
-load_dotenv()
 
 # Configure logging with local time
 logging.basicConfig(
@@ -191,6 +194,10 @@ async def on_startup():
         )
         data_endpoints.set_redis_service(redis_service, config.redis_pubsub_enabled)
         data_endpoints.set_postgres_service(postgres_service)
+        if postgres_service:
+            auth_endpoints.set_user_auth_service(UserAuthService(postgres_service))
+        else:
+            auth_endpoints.set_user_auth_service(None)
         data_endpoints.set_archive_config(
             config.archive_interval_seconds,
             config.archive_batch_size,
