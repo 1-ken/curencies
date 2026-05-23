@@ -7,6 +7,8 @@ import os
 from twilio.rest import Client
 from twilio.twiml.voice_response import VoiceResponse
 
+from app.core.alert_limits import truncate_call_custom_message
+
 logger = logging.getLogger(__name__)
 
 
@@ -68,7 +70,7 @@ class CallService:
         default_message: str,
     ) -> str:
         if custom_message:
-            return custom_message
+            return truncate_call_custom_message(custom_message)
         if default_message:
             return default_message
         return (

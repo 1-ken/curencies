@@ -5,11 +5,13 @@ from typing import Union
 from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.auth import get_current_user_id
+from app.core.alert_limits import validate_custom_message_for_channel
 from app.core.channels import (
     channel_requires_email,
     channel_requires_phone,
     validate_alert_channel,
 )
+from app.utils.phone import normalize_phone
 from app.schemas.alert import (
     CreateAlertRequest,
     UpdateAlertRequest,
@@ -43,6 +45,16 @@ def _validate_channel_fields(channel: str, email: str, phone: str) -> None:
     if channel_requires_phone(channel) and not phone:
         detail = "Phone is required for SMS alerts" if channel == "sms" else "Phone is required for call alerts"
         raise HTTPException(status_code=400, detail=detail)
+
+
+def _prepare_alert_fields(channel: str, email: str, phone: str, custom_message: str) -> tuple[str, str, str]:
+    """Normalize phone and validate custom message for the channel."""
+    try:
+        validate_custom_message_for_channel(channel, custom_message or "")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    normalized_phone = normalize_phone(phone) if channel in ("sms", "call") else (phone or "")
+    return email or "", normalized_phone, custom_message or ""
 
 
 def _validate_channel_update(channel: str, email: str | None, phone: str | None, alert) -> None:
@@ -84,6 +96,9 @@ async def create_alert(
     if hasattr(request, "interval") and request.interval:
         request.interval = request.interval.strip().lower()
         _validate_channel_fields(request.channel, request.email, request.phone)
+        email, phone, custom_message = _prepare_alert_fields(
+            request.channel, request.email, request.phone, request.custom_message
+        )
 
         if request.direction not in ["above", "below"]:
             raise HTTPException(status_code=400, detail="Direction must be 'above' or 'below'")
@@ -102,10 +117,10 @@ async def create_alert(
                 direction=request.direction,
                 threshold=request.threshold,
                 user_id=user_id,
-                email=request.email,
+                email=email,
                 channel=request.channel,
-                phone=request.phone,
-                custom_message=request.custom_message,
+                phone=phone,
+                custom_message=custom_message,
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
@@ -115,16 +130,19 @@ async def create_alert(
         raise HTTPException(status_code=400, detail="Condition must be 'above', 'below', or 'equal'")
 
     _validate_channel_fields(request.channel, request.email, request.phone)
+    email, phone, custom_message = _prepare_alert_fields(
+        request.channel, request.email, request.phone, request.custom_message
+    )
 
     alert = await alert_manager.create_alert(
         pair=request.pair,
         target_price=request.target_price,
         condition=request.condition,
         user_id=user_id,
-        email=request.email,
+        email=email,
         channel=request.channel,
-        phone=request.phone,
-        custom_message=request.custom_message,
+        phone=phone,
+        custom_message=custom_message,
     )
     return {"success": True, "alert": alert.to_dict()}
 
@@ -171,6 +189,15 @@ async def update_alert(
 
     updates = request.model_dump(exclude_unset=True)
     updates.pop("user_id", None)
+
+    effective_channel = updates.get("channel", alert.channel)
+    if "custom_message" in updates:
+        try:
+            validate_custom_message_for_channel(effective_channel, updates["custom_message"] or "")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if "phone" in updates and effective_channel in ("sms", "call"):
+        updates["phone"] = normalize_phone(updates["phone"] or "")
 
     if alert.alert_type == "price":
         if "condition" in updates and updates["condition"] not in ["above", "below", "equal"]:

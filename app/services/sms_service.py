@@ -3,9 +3,9 @@ SMS notification service using SMS Gate (api.sms-gate.app).
 """
 import logging
 import os
-import re
-
 import requests
+
+from app.utils.phone import normalize_phone as normalize_phone_util
 
 logger = logging.getLogger(__name__)
 
@@ -30,14 +30,7 @@ class SMSService:
 
     @staticmethod
     def _normalize_phone(phone: str) -> str:
-        cleaned = re.sub(r"[^\d+]", "", (phone or "").strip())
-        if not cleaned:
-            return ""
-        if cleaned.startswith("+"):
-            return cleaned
-        if cleaned.startswith("00"):
-            return f"+{cleaned[2:]}"
-        return f"+{cleaned}"
+        return normalize_phone_util(phone)
 
     def _build_message(
         self,
