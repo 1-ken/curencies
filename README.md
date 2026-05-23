@@ -68,7 +68,7 @@ Restart the API after changing database configuration.
 Authorization: Bearer eyJhbGciOi...
 ```
 
-Alert provider environment variables (SendGrid, Africa's Talking, Twilio) are listed in `DEPLOYMENT.md`.
+Alert provider environment variables (SMS Gate, SendGrid, Twilio) are listed in `.env.example`.
 
 Notes on selectors:
 - Table rows: `<tableSelector> tbody tr`

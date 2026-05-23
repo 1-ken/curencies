@@ -28,7 +28,7 @@ app/
 │   ├── alert_service.py     # Alert management logic (AlertManager)
 │   ├── observer_service.py  # Browser-based market data observer (SiteObserver)
 │   ├── email_service.py     # SendGrid email notifications
-│   └── sms_service.py       # Africa's Talking SMS notifications
+│   └── sms_service.py       # SMS Gate SMS notifications
 ├── models/                  # SQLAlchemy ORM models (future DB support)
 │   └── __init__.py
 ├── crud/                    # Database CRUD operations (future use)
@@ -50,7 +50,7 @@ app/
 ## Key Features
 
 - Real-time forex price monitoring via Playwright browser automation
-- Price alerts with email (SendGrid) and SMS (Africa's Talking) notifications
+- Price alerts with email (SendGrid) and SMS (SMS Gate) notifications
 - WebSocket data streaming to connected clients
 - Continuous alert monitoring independent of client connections
 - Modular architecture easy to extend with database support

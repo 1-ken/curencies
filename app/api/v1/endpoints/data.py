@@ -991,15 +991,15 @@ async def alert_monitoring_task():
     sendgrid_api_key = os.getenv("SENDGRID_API_KEY")
     email_service = EmailService(sendgrid_api_key) if sendgrid_api_key else None
     
-    af_username = os.getenv("AFRICASTALKING_USERNAME")
-    af_api_key = os.getenv("AFRICASTALKING_API_KEY")
+    sms_gate_username = os.getenv("SMS_GATE_USERNAME", "").strip()
+    sms_gate_password = os.getenv("SMS_GATE_PASSWORD", "")
     sms_service = None
-    if af_username and af_api_key:
+    if sms_gate_username and sms_gate_password:
         try:
-            sms_service = SMSService(af_username, af_api_key)
-            logger.info("SMS service available for alerts")
+            sms_service = SMSService(sms_gate_username, sms_gate_password)
+            logger.info("SMS Gate service available for alerts")
         except Exception as e:
-            logger.error(f"Failed to initialize SMS service: {e}")
+            logger.error("Failed to initialize SMS Gate service: %s", e)
 
     call_service = None
     twilio_account_sid = os.getenv("TWILIO_ACCOUNT_SID")

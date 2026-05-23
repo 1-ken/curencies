@@ -366,7 +366,7 @@
               "host": ["{{base_url}}", "api", "v1"],
               "path": ["alerts"]
             },
-            "description": "Create an SMS price alert (requires AFRICASTALKING credentials)"
+            "description": "Create an SMS price alert (requires SMS_GATE_USERNAME and SMS_GATE_PASSWORD)"
           },
           "response": []
         },

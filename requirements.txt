@@ -40,12 +40,10 @@ redis==5.0.8
 playwright==1.48.0
 pyee==12.0.0
 
-# ─── Notifications (SMS, email, voice) ──────────────────────────────────────────
+# ─── Notifications (SMS via SMS Gate, email, voice) ─────────────────────────────
 sendgrid==6.11.0
 python-http-client==3.3.7
 starkbank-ecdsa==2.2.0
-africastalking==2.0.2
-schema==0.7.8
 twilio==9.10.5
 aiohttp==3.13.5
 aiohttp-retry==2.9.1

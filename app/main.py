@@ -75,12 +75,12 @@ if sendgrid_api_key:
 else:
     logger.warning("SENDGRID_API_KEY not set, email alerts disabled")
 
-af_username = os.getenv("AFRICASTALKING_USERNAME")
-af_api_key = os.getenv("AFRICASTALKING_API_KEY")
-if af_username and af_api_key:
-    logger.info("Africa's Talking SMS service initialized")
+sms_gate_username = os.getenv("SMS_GATE_USERNAME", "").strip()
+sms_gate_password = os.getenv("SMS_GATE_PASSWORD", "")
+if sms_gate_username and sms_gate_password:
+    logger.info("SMS Gate service configured")
 else:
-    logger.warning("AFRICASTALKING credentials not set, SMS alerts disabled")
+    logger.warning("SMS_GATE_USERNAME/SMS_GATE_PASSWORD not set, SMS alerts disabled")
 
 twilio_account_sid = os.getenv("TWILIO_ACCOUNT_SID")
 twilio_auth_token = os.getenv("TWILIO_AUTH_TOKEN")
