@@ -1,6 +1,9 @@
 """Limits for alert fields (custom messages, etc.)."""
+import os
+
 CUSTOM_MESSAGE_MAX_CHARS = 500
 CALL_CUSTOM_MESSAGE_MAX_CHARS = 600
+CALL_DAILY_LIMIT_PER_USER = max(1, int(os.getenv("CALL_DAILY_LIMIT_PER_USER", "3")))
 
 
 def validate_custom_message_for_channel(channel: str, custom_message: str) -> None:

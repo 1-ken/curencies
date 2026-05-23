@@ -1,6 +1,7 @@
 """PostgreSQL integration for historical storage."""
 import logging
 import re
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
@@ -10,7 +11,7 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from app.db.migrations import run_pending_sql_migrations
-from app.models import AlertRecord, Base, HistoricalPrice, StreamMetric, User, UserState
+from app.models import AlertRecord, Base, CallUsageLog, HistoricalPrice, StreamMetric, User, UserState
 from app.utils.pair_normalizer import (
     PROVIDER_SUFFIXES,
     canonical_pair,
@@ -599,6 +600,58 @@ class PostgresService:
                 return parsed.replace(tzinfo=timezone.utc)
             return parsed.astimezone(timezone.utc)
         return None
+
+    async def count_calls_since(self, user_id: str, since: datetime) -> int:
+        if not self._sessionmaker:
+            return 0
+        async with self._sessionmaker() as session:
+            result = await session.scalar(
+                select(func.count())
+                .select_from(CallUsageLog)
+                .where(
+                    CallUsageLog.user_id == user_id,
+                    CallUsageLog.placed_at >= since,
+                )
+            )
+            return int(result or 0)
+
+    async def reserve_call_slot(
+        self,
+        user_id: str,
+        alert_id: str,
+        daily_limit: int,
+    ) -> bool:
+        """Reserve one call slot for today if the user is under the daily limit."""
+        if not self._sessionmaker:
+            return False
+        now = datetime.now(timezone.utc)
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+        async with self._sessionmaker() as session:
+            async with session.begin():
+                await session.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+                    {"lock_key": f"call_quota:{user_id}"},
+                )
+                count = await session.scalar(
+                    select(func.count())
+                    .select_from(CallUsageLog)
+                    .where(
+                        CallUsageLog.user_id == user_id,
+                        CallUsageLog.placed_at >= day_start,
+                    )
+                )
+                if int(count or 0) >= daily_limit:
+                    return False
+                session.add(
+                    CallUsageLog(
+                        id=str(uuid.uuid4()),
+                        user_id=user_id,
+                        alert_id=alert_id or "",
+                        placed_at=datetime.now(timezone.utc),
+                    )
+                )
+                return True
 
     @staticmethod
     def _parse_optional_str(value: Any) -> Optional[str]:

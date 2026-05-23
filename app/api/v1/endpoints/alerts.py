@@ -23,6 +23,7 @@ from app.schemas.alert import (
     DeleteAlertResponse,
 )
 from app.services.alert_service import AlertManager
+from app.services.call_quota_service import CallQuotaService
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,14 @@ def _validate_channel_fields(channel: str, email: str, phone: str) -> None:
     if channel_requires_phone(channel) and not phone:
         detail = "Phone is required for SMS alerts" if channel == "sms" else "Phone is required for call alerts"
         raise HTTPException(status_code=400, detail=detail)
+
+
+async def _ensure_call_quota_available(user_id: str, channel: str) -> None:
+    if channel != "call":
+        return
+    quota = CallQuotaService(alert_manager.postgres_service if alert_manager else None)
+    if not await quota.can_place_call(user_id):
+        raise HTTPException(status_code=429, detail=quota.quota_message())
 
 
 def _prepare_alert_fields(channel: str, email: str, phone: str, custom_message: str) -> tuple[str, str, str]:
@@ -96,6 +105,7 @@ async def create_alert(
     if hasattr(request, "interval") and request.interval:
         request.interval = request.interval.strip().lower()
         _validate_channel_fields(request.channel, request.email, request.phone)
+        await _ensure_call_quota_available(user_id, request.channel)
         email, phone, custom_message = _prepare_alert_fields(
             request.channel, request.email, request.phone, request.custom_message
         )
@@ -130,6 +140,7 @@ async def create_alert(
         raise HTTPException(status_code=400, detail="Condition must be 'above', 'below', or 'equal'")
 
     _validate_channel_fields(request.channel, request.email, request.phone)
+    await _ensure_call_quota_available(user_id, request.channel)
     email, phone, custom_message = _prepare_alert_fields(
         request.channel, request.email, request.phone, request.custom_message
     )
@@ -191,6 +202,10 @@ async def update_alert(
     updates.pop("user_id", None)
 
     effective_channel = updates.get("channel", alert.channel)
+    if effective_channel == "call" and (
+        "channel" in updates or alert.channel != "call"
+    ):
+        await _ensure_call_quota_available(user_id, "call")
     if "custom_message" in updates:
         try:
             validate_custom_message_for_channel(effective_channel, updates["custom_message"] or "")

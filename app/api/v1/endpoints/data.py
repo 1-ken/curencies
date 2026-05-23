@@ -15,6 +15,7 @@ from app.services.observer_service import SiteObserver
 from app.services.alert_service import AlertManager
 from app.services.redis_service import RedisService
 from app.services.postgres_service import PostgresService
+from app.services.call_quota_service import CallQuotaService
 from app.utils.forex_market_hours import is_forex_market_open, get_time_until_market_opens
 from app.utils.pair_normalizer import canonical_pair
 from app.schemas.responses import (
@@ -1063,15 +1064,30 @@ async def alert_monitoring_task():
                         timeframe=job.get("timeframe", ""),
                     )
                 elif channel == "call" and call_service and alert.get("phone"):
-                    sent = await _run_alert_action(
-                        call_service.send_price_alert,
-                        to_phone=alert["phone"],
-                        pair=alert["pair"],
-                        target_price=job.get("target_price"),
-                        current_price=job.get("current_price"),
-                        condition=job.get("condition"),
-                        custom_message=alert.get("custom_message", ""),
+                    user_id = str(alert.get("user_id") or "legacy-unassigned")
+                    quota = CallQuotaService(postgres_service)
+                    allowed, reason = await quota.reserve_call_slot(
+                        user_id,
+                        str(alert.get("id") or ""),
                     )
+                    if not allowed:
+                        logger.warning(
+                            "Daily call limit reached for user %s (alert %s): %s",
+                            user_id,
+                            alert.get("id"),
+                            reason,
+                        )
+                        sent = True
+                    else:
+                        sent = await _run_alert_action(
+                            call_service.send_price_alert,
+                            to_phone=alert["phone"],
+                            pair=alert["pair"],
+                            target_price=job.get("target_price"),
+                            current_price=job.get("current_price"),
+                            condition=job.get("condition"),
+                            custom_message=alert.get("custom_message", ""),
+                        )
                 elif channel == "email" and email_service and alert.get("email"):
                     sent = await _run_alert_action(
                         email_service.send_price_alert,
