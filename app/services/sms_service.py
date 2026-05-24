@@ -117,3 +117,36 @@ class SMSService:
         except requests.RequestException as exc:
             logger.error("Failed to send SMS to %s via SMS Gate: %s", destination, exc)
             return False
+
+    def send_plain_message(self, to_phone: str, message: str) -> bool:
+        """Send a plain SMS message (OTP, admin codes, etc.)."""
+        destination = self._normalize_phone(to_phone)
+        if not destination:
+            logger.error("No valid destination phone number for SMS")
+            return False
+
+        payload = {
+            "message": message,
+            "phoneNumbers": [destination],
+        }
+
+        try:
+            response = requests.post(
+                self.api_url,
+                auth=(self.username, self.password),
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=self.timeout_seconds,
+            )
+            if 200 <= response.status_code < 300:
+                return True
+            logger.error(
+                "SMS Gate plain message failed for %s (HTTP %s): %s",
+                destination,
+                response.status_code,
+                response.text[:500],
+            )
+            return False
+        except requests.RequestException as exc:
+            logger.error("Failed to send plain SMS to %s: %s", destination, exc)
+            return False

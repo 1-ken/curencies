@@ -2,7 +2,7 @@
 import logging
 from typing import Union
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 
 from app.core.auth import get_current_user_id
 from app.core.alert_limits import validate_custom_message_for_channel
@@ -22,6 +22,7 @@ from app.schemas.alert import (
     CreateUpdateAlertResponse,
     DeleteAlertResponse,
 )
+from app.services.activity_log_service import log_activity
 from app.services.alert_service import AlertManager
 from app.services.call_quota_service import CallQuotaService
 
@@ -87,6 +88,7 @@ def set_alert_manager(manager: AlertManager):
 @router.post("", response_model=CreateUpdateAlertResponse)
 async def create_alert(
     request: Union[CreateAlertRequest, CreateCandleAlertRequest],
+    http_request: Request,
     user_id: str = Depends(get_current_user_id),
 ):
     """Create a new alert (price-based or candle-close)."""
@@ -134,6 +136,12 @@ async def create_alert(
             )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
+        await log_activity(
+            "alert_create",
+            user_id=user_id,
+            request=http_request,
+            metadata={"alert_id": alert.id, "pair": alert.pair, "type": "candle_close"},
+        )
         return {"success": True, "alert": alert.to_dict()}
 
     if request.condition not in ["above", "below", "equal"]:
@@ -154,6 +162,12 @@ async def create_alert(
         channel=request.channel,
         phone=phone,
         custom_message=custom_message,
+    )
+    await log_activity(
+        "alert_create",
+        user_id=user_id,
+        request=http_request,
+        metadata={"alert_id": alert.id, "pair": alert.pair, "type": "price"},
     )
     return {"success": True, "alert": alert.to_dict()}
 
@@ -180,9 +194,19 @@ async def get_alert(alert_id: str, user_id: str = Depends(get_current_user_id)):
 
 
 @router.delete("/{alert_id}", response_model=DeleteAlertResponse)
-async def delete_alert(alert_id: str, user_id: str = Depends(get_current_user_id)):
+async def delete_alert(
+    alert_id: str,
+    http_request: Request,
+    user_id: str = Depends(get_current_user_id),
+):
     """Delete an alert owned by the user."""
     if await alert_manager.delete_alert(alert_id, user_id=user_id):
+        await log_activity(
+            "alert_delete",
+            user_id=user_id,
+            request=http_request,
+            metadata={"alert_id": alert_id},
+        )
         return {"success": True, "message": "Alert deleted"}
     raise HTTPException(status_code=404, detail="Alert not found")
 
@@ -191,6 +215,7 @@ async def delete_alert(alert_id: str, user_id: str = Depends(get_current_user_id
 async def update_alert(
     alert_id: str,
     request: Union[UpdateAlertRequest, UpdateCandleAlertRequest],
+    http_request: Request,
     user_id: str = Depends(get_current_user_id),
 ):
     """Update an existing alert owned by the user."""
@@ -244,4 +269,10 @@ async def update_alert(
     if not updated_alert:
         raise HTTPException(status_code=404, detail="Alert not found")
 
+    await log_activity(
+        "alert_update",
+        user_id=user_id,
+        request=http_request,
+        metadata={"alert_id": alert_id, "pair": updated_alert.pair},
+    )
     return {"success": True, "alert": updated_alert.to_dict()}

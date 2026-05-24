@@ -18,7 +18,7 @@ class HealthCheckDetails(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str
-    timestamp: datetime
+    timestamp: str
     checks: HealthCheckDetails
 
 
@@ -43,6 +43,7 @@ class StreamHealthResponse(BaseModel):
     queue_subscriber_count: int
     retention_days: int
     retention_cleanup_schedule_utc: str
+    retention_cleanup_schedule: Optional[str] = None
     retention_cleanup_last_run_at: Optional[str]
     retention_cleanup_next_run_at: str
     retention_cleanup_last_result: Dict[str, Any]
@@ -70,7 +71,7 @@ class SnapshotResponse(BaseModel):
 class UserBootstrapResponse(BaseModel):
     userId: str
     isFirstTimeUser: bool
-    onboardingCompletedAt: Optional[datetime] = None
+    onboardingCompletedAt: Optional[str] = None
     authRequired: bool
     wsUrl: str
     apiBaseUrl: Optional[str] = None
@@ -79,5 +80,5 @@ class UserBootstrapResponse(BaseModel):
 class OnboardingCompleteResponse(BaseModel):
     success: bool
     userId: str
-    onboardingCompletedAt: datetime
+    onboardingCompletedAt: str
     isFirstTimeUser: bool

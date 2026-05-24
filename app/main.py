@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import text
 
@@ -20,11 +21,17 @@ from app.services.observer_service import SiteObserver
 from app.services.postgres_service import PostgresService
 from app.services.redis_service import RedisService
 from app.api.v1 import api as api_v1
+from app.api.v1.endpoints import admin as admin_endpoints
 from app.api.v1.endpoints import alerts as alerts_endpoints
 from app.api.v1.endpoints import auth as auth_endpoints
 from app.api.v1.endpoints import data as data_endpoints
+from app.api.v1.endpoints import favorites as favorites_endpoints
+from app.services.admin_otp_service import AdminOtpService
+from app.services.sms_service import SMSService
+from app.services.activity_log_service import set_postgres_service as set_activity_log_postgres
 from app.services.user_auth_service import UserAuthService
 from app.schemas.responses import HealthResponse, PingResponse
+from app.utils.kenya_time import format_kenya_iso, kenya_logging_time, now_kenya_iso
 
 # Configure logging with local time
 logging.basicConfig(
@@ -32,7 +39,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
-logging.Formatter.converter = time.localtime
+logging.Formatter.converter = kenya_logging_time
 logger = logging.getLogger(__name__)
 
 # Initialize configuration
@@ -43,6 +50,24 @@ app = FastAPI(
     title="Finance Observer",
     description="Real-time forex currency pair price monitoring with price alerts",
     version="1.0.0"
+)
+
+
+def _cors_origins() -> list[str]:
+    """Allowed browser origins for cross-origin API calls (e.g. Next.js admin panel)."""
+    raw = os.getenv(
+        "CORS_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000",
+    )
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins(),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -194,10 +219,28 @@ async def on_startup():
         )
         data_endpoints.set_redis_service(redis_service, config.redis_pubsub_enabled)
         data_endpoints.set_postgres_service(postgres_service)
+        favorites_endpoints.set_postgres_service(postgres_service)
+        set_activity_log_postgres(postgres_service)
         if postgres_service:
             auth_endpoints.set_user_auth_service(UserAuthService(postgres_service))
+            auth_endpoints.set_postgres_service(postgres_service)
         else:
             auth_endpoints.set_user_auth_service(None)
+            auth_endpoints.set_postgres_service(None)
+
+        sms_gate_username = os.getenv("SMS_GATE_USERNAME", "").strip()
+        sms_gate_password = os.getenv("SMS_GATE_PASSWORD", "")
+        sms_service = None
+        if sms_gate_username and sms_gate_password:
+            try:
+                sms_service = SMSService(sms_gate_username, sms_gate_password)
+            except Exception as exc:
+                logger.error("Failed to initialize SMS service for admin OTP: %s", exc)
+
+        admin_endpoints.set_admin_services(
+            postgres_service,
+            AdminOtpService(redis_service, sms_service),
+        )
         data_endpoints.set_archive_config(
             config.archive_interval_seconds,
             config.archive_batch_size,
@@ -398,7 +441,7 @@ async def health_check():
     stream_failures = getattr(data_endpoints, "snapshot_failure_count", None)
     last_ts = getattr(data_endpoints, "last_snapshot_ts", None)
     checks["stream_failures"] = stream_failures
-    checks["last_snapshot_ts"] = last_ts
+    checks["last_snapshot_ts"] = format_kenya_iso(last_ts) if last_ts else None
     if stream_failures is not None and stream_failures >= getattr(data_endpoints, "MAX_SNAPSHOT_FAILURES", 4):
         overall = "down"
 
@@ -406,7 +449,7 @@ async def health_check():
     return JSONResponse(
         {
             "status": overall,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": now_kenya_iso(),
             "checks": checks,
         },
         status_code=status_code,

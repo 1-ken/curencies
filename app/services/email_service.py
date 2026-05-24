@@ -81,5 +81,6 @@ class EmailService:
 
     @staticmethod
     def _get_timestamp() -> str:
-        from datetime import datetime
-        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        from app.utils.kenya_time import format_kenya_display, now_kenya
+
+        return format_kenya_display(now_kenya())

@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 
 from app.services.postgres_service import PostgresService
 from app.services.redis_service import RedisService
+from app.utils.kenya_time import format_kenya_iso, now_kenya_iso, parse_to_aware_utc
 from app.utils.pair_normalizer import canonical_pair
 
 logger = logging.getLogger(__name__)
@@ -99,13 +100,13 @@ class AlertManager:
                 user_id=getattr(row, "user_id", None) or "legacy-unassigned",
                 pair=row.pair,
                 status=row.status,
-                created_at=row.created_at.isoformat(),
+                created_at=format_kenya_iso(row.created_at) or "",
                 alert_type=row.alert_type,
                 channel=row.channel,
                 email=row.email,
                 phone=row.phone,
                 custom_message=row.custom_message,
-                triggered_at=row.triggered_at.isoformat() if row.triggered_at else None,
+                triggered_at=format_kenya_iso(row.triggered_at),
                 last_checked_price=row.last_checked_price,
                 close_price=row.close_price,
                 target_price=row.target_price,
@@ -113,11 +114,7 @@ class AlertManager:
                 interval=row.interval,
                 direction=row.direction,
                 threshold=row.threshold,
-                last_evaluated_candle_time=(
-                    row.last_evaluated_candle_time.isoformat()
-                    if row.last_evaluated_candle_time
-                    else None
-                ),
+                last_evaluated_candle_time=format_kenya_iso(row.last_evaluated_candle_time),
             )
             if alert_obj.alert_type == "candle_close":
                 alert_obj.interval = self._normalize_interval(alert_obj.interval)
@@ -143,7 +140,7 @@ class AlertManager:
     async def _persist_alert(self, alert: Alert) -> None:
         payload = {
             "event_id": str(uuid.uuid4()),
-            "event_ts": self._utc_now_iso(),
+            "event_ts": now_kenya_iso(),
             "op": "upsert",
             "alert_id": alert.id,
             "alert": alert.to_dict(),
@@ -158,7 +155,7 @@ class AlertManager:
     async def _persist_delete(self, alert_id: str) -> None:
         payload = {
             "event_id": str(uuid.uuid4()),
-            "event_ts": self._utc_now_iso(),
+            "event_ts": now_kenya_iso(),
             "op": "delete",
             "alert_id": alert_id,
         }
@@ -197,22 +194,11 @@ class AlertManager:
 
     @staticmethod
     def _utc_now_iso() -> str:
-        return datetime.now(timezone.utc).isoformat()
+        return now_kenya_iso()
 
     @staticmethod
     def _parse_iso_utc(value: Optional[str]) -> Optional[datetime]:
-        if not value:
-            return None
-        normalized = str(value).strip()
-        if normalized.endswith("Z"):
-            normalized = normalized[:-1] + "+00:00"
-        try:
-            parsed = datetime.fromisoformat(normalized)
-        except (TypeError, ValueError):
-            return None
-        if parsed.tzinfo is None:
-            return parsed.replace(tzinfo=timezone.utc)
-        return parsed.astimezone(timezone.utc)
+        return parse_to_aware_utc(value)
 
     @staticmethod
     def _interval_seconds(interval: Optional[str]) -> Optional[int]:
@@ -587,8 +573,12 @@ class AlertManager:
                     "candle": {
                         "pair": candle.get("pair"),
                         "interval": normalized_alert_interval,
-                        "expected_open": candle_start.isoformat() if candle_start else str(candle_time),
-                        "expected_close": (candle_start + timedelta(seconds=interval_seconds)).isoformat() if candle_start and interval_seconds else None,
+                        "expected_open": format_kenya_iso(candle_start) if candle_start else str(candle_time),
+                        "expected_close": format_kenya_iso(
+                            candle_start + timedelta(seconds=interval_seconds)
+                        )
+                        if candle_start and interval_seconds
+                        else None,
                     },
                 })
         

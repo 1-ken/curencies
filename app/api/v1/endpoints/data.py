@@ -18,6 +18,7 @@ from app.services.postgres_service import PostgresService
 from app.services.call_quota_service import CallQuotaService
 from app.utils.forex_market_hours import is_forex_market_open, get_time_until_market_opens
 from app.utils.pair_normalizer import canonical_pair
+from app.utils.kenya_time import format_kenya_iso, now_kenya_iso
 from app.schemas.responses import (
     SnapshotResponse,
     ClientConfigResponse,
@@ -222,7 +223,7 @@ async def _collect_snapshot_from_observers() -> Dict[str, Any]:
         "sources": by_source,
         "pairsSample": merged_samples[:10],
         "changes": merged_changes,
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "ts": now_kenya_iso(),
     }
 
 
@@ -240,6 +241,16 @@ def _split_pairs_by_source(data: Dict[str, Any]) -> Dict[str, List[Dict[str, Any
         source_name = str(item.get("source") or "default")
         grouped.setdefault(source_name, []).append(item)
     return grouped
+
+
+def _build_snapshot_pairs(grouped: Dict[str, List[Dict[str, Any]]]) -> Dict[str, List[Dict[str, Any]]]:
+    """Group snapshot pairs into currencies, commodities, and indices."""
+    indices = grouped.get("usd-index", []) + grouped.get("dxy", [])
+    return {
+        "currencies": grouped.get("currencies", []),
+        "commodities": grouped.get("commodities", []) + grouped.get("bonds", []),
+        "indices": indices,
+    }
 
 
 def set_redis_service(service: Optional[RedisService], pubsub_enabled: bool):
@@ -325,14 +336,8 @@ async def snapshot(_user_id: str = Depends(get_current_user_id)):
                 return JSONResponse(
                     {
                         "market_status": "open" if is_forex_market_open() else "closed",
-                        "pairs": {
-                            "currencies": cached_sources.get("currencies", [])
-                            + cached_sources.get("usd-index", [])
-                            + cached_sources.get("dxy", []),
-                            "commodities": cached_sources.get("commodities", [])
-                            + cached_sources.get("bonds", []),
-                        },
-                        "ts": cached_ts,
+                        "pairs": _build_snapshot_pairs(cached_sources),
+                        "ts": format_kenya_iso(cached_ts) or now_kenya_iso(),
                     }
                 )
         except Exception:
@@ -350,14 +355,8 @@ async def snapshot(_user_id: str = Depends(get_current_user_id)):
 
         clean_data = {
             "market_status": "open" if is_forex_market_open() else "closed",
-            "pairs": {
-                "currencies": grouped_pairs.get("currencies", [])
-                + grouped_pairs.get("usd-index", [])
-                + grouped_pairs.get("dxy", []),
-                "commodities": grouped_pairs.get("commodities", [])
-                + grouped_pairs.get("bonds", []),
-            },
-            "ts": data.get("ts")
+            "pairs": _build_snapshot_pairs(grouped_pairs),
+            "ts": format_kenya_iso(data.get("ts")) or now_kenya_iso(),
         }
         return JSONResponse(clean_data)
     except asyncio.TimeoutError:
@@ -401,7 +400,7 @@ async def get_me(user_id: str = Depends(get_current_user_id)):
     return UserBootstrapResponse(
         userId=user_state.user_id,
         isFirstTimeUser=is_first_time_user,
-        onboardingCompletedAt=user_state.onboarding_completed_at,
+        onboardingCompletedAt=format_kenya_iso(user_state.onboarding_completed_at),
         authRequired=not AUTH_DISABLED,
         wsUrl=os.getenv("WS_URL", "").strip() or "ws://127.0.0.1:8000/ws/observe",
         apiBaseUrl=os.getenv("API_BASE_URL"),
@@ -426,7 +425,7 @@ async def complete_onboarding(user_id: str = Depends(get_current_user_id)):
     return OnboardingCompleteResponse(
         success=True,
         userId=user_state.user_id,
-        onboardingCompletedAt=user_state.onboarding_completed_at,
+        onboardingCompletedAt=format_kenya_iso(user_state.onboarding_completed_at),
         isFirstTimeUser=False,
     )
 
@@ -464,17 +463,18 @@ async def stream_health(_user_id: str = Depends(get_current_user_id)):
             "snapshot_timeout_seconds": SNAPSHOT_TIMEOUT_SECONDS,
             "max_snapshot_failures": MAX_SNAPSHOT_FAILURES,
             "consecutive_snapshot_failures": snapshot_failure_count,
-            "last_snapshot_ts": last_snapshot_ts,
+            "last_snapshot_ts": format_kenya_iso(last_snapshot_ts),
             "last_snapshot_age_seconds": last_snapshot_age_seconds,
             "subscriber_count": _get_active_subscriber_count(),
             "ws_subscriber_count": _get_active_subscriber_count(),
             "queue_subscriber_count": len(data_subscribers),
             "retention_days": RETENTION_DAYS,
-            "retention_cleanup_schedule_utc": "Sunday 22:00",
-            "retention_cleanup_last_run_at": retention_cleanup_last_run_at,
-            "retention_cleanup_next_run_at": _next_retention_cleanup_at(
-                datetime.now(timezone.utc)
-            ).isoformat(),
+            "retention_cleanup_schedule": "Sunday 22:00 EAT (Africa/Nairobi)",
+            "retention_cleanup_schedule_utc": "Sunday 22:00 UTC",
+            "retention_cleanup_last_run_at": format_kenya_iso(retention_cleanup_last_run_at),
+            "retention_cleanup_next_run_at": format_kenya_iso(
+                _next_retention_cleanup_at(datetime.now(timezone.utc))
+            ),
             "retention_cleanup_last_result": retention_cleanup_last_result,
         }
     )
@@ -639,7 +639,7 @@ def _attach_alerts(data: Dict[str, Any], user_id: Optional[str] = None) -> Dict[
             "commodities": grouped_pairs.get("commodities", [])
             + grouped_pairs.get("bonds", []),
         },
-        "ts": data.get("ts"),
+        "ts": format_kenya_iso(data.get("ts")) or now_kenya_iso(),
         "alerts": {
             "active": [
                 a.to_dict()
@@ -730,7 +730,7 @@ async def _build_stream_ohlc_for_pair(
         volume = 1
 
     return {
-        "timestamp": bucket_time.isoformat(),
+        "timestamp": format_kenya_iso(bucket_time),
         "open": open_price,
         "high": high_price,
         "low": low_price,
@@ -738,8 +738,8 @@ async def _build_stream_ohlc_for_pair(
         "volume": volume,
         "is_forming": True,
         "interval": interval,
-        "expected_open": bucket_time.isoformat(),
-        "expected_close": bucket_end_time.isoformat(),
+        "expected_open": format_kenya_iso(bucket_time),
+        "expected_close": format_kenya_iso(bucket_end_time),
         "progress_percent": round(progress_percent, 2),
         "time_remaining_seconds": round(interval_seconds - time_in_bucket, 2),
     }
@@ -925,7 +925,7 @@ async def data_streaming_task():
                     raise ValueError("Snapshot returned empty pairs")
 
                 latest_data = data
-                last_snapshot_ts = data.get("ts") or datetime.now(timezone.utc).isoformat()
+                last_snapshot_ts = data.get("ts") or now_kenya_iso()
                 snapshot_failure_count = 0
 
                 if redis_service:
@@ -1321,7 +1321,7 @@ async def retention_cleanup_task():
                 run_key = now_utc.date().isoformat()
                 if _retention_cleanup_last_run_key != run_key:
                     deleted = await postgres_service.delete_old_data(RETENTION_DAYS)
-                    retention_cleanup_last_run_at = now_utc.isoformat()
+                    retention_cleanup_last_run_at = now_kenya_iso()
                     retention_cleanup_last_result = deleted
                     _retention_cleanup_last_run_key = run_key
                     logger.info(
@@ -1374,7 +1374,7 @@ async def historical_data(
         {
             "pair": row.pair,
             "price": float(row.price),
-            "observed_at": row.observed_at.isoformat(),
+            "observed_at": format_kenya_iso(row.observed_at),
         }
         for row in rows
     ]
@@ -1431,14 +1431,16 @@ async def historical_ohlc(
         # Format response
         formatted_candles = [
             {
-                "timestamp": candle["timestamp"].isoformat(),
+                "timestamp": format_kenya_iso(candle["timestamp"]),
                 "open": candle["open"],
                 "high": candle["high"],
                 "low": candle["low"],
                 "close": candle["close"],
                 "volume": candle["volume"],
-                "expected_open": candle["timestamp"].isoformat(),
-                "expected_close": (candle["timestamp"] + timedelta(seconds=_interval_to_seconds(interval))).isoformat(),
+                "expected_open": format_kenya_iso(candle["timestamp"]),
+                "expected_close": format_kenya_iso(
+                    candle["timestamp"] + timedelta(seconds=_interval_to_seconds(interval))
+                ),
             }
             for candle in candles
         ]
@@ -1446,8 +1448,8 @@ async def historical_ohlc(
         return JSONResponse({
             "pair": pair,
             "interval": interval,
-            "start": start_dt.isoformat() if start_dt else None,
-            "end": end_dt.isoformat() if end_dt else None,
+            "start": format_kenya_iso(start_dt) if start_dt else None,
+            "end": format_kenya_iso(end_dt) if end_dt else None,
             "count": len(formatted_candles),
             "candles": formatted_candles,
         })
@@ -1489,7 +1491,7 @@ async def historical_stream_metrics(
 
     items = [
         {
-            "observed_at": row.observed_at.isoformat(),
+            "observed_at": format_kenya_iso(row.observed_at),
             "ws_subscriber_count": row.ws_subscriber_count,
             "queue_subscriber_count": row.queue_subscriber_count,
             "snapshot_failure_count": row.snapshot_failure_count,
@@ -1566,15 +1568,17 @@ async def historical_ohlc_with_forming(
         # Format historical candles
         formatted_candles = [
             {
-                "timestamp": candle["timestamp"].isoformat(),
+                "timestamp": format_kenya_iso(candle["timestamp"]),
                 "open": float(candle["open"]),
                 "high": float(candle["high"]),
                 "low": float(candle["low"]),
                 "close": float(candle["close"]),
                 "volume": candle["volume"],
                 "is_forming": False,
-                "expected_open": candle["timestamp"].isoformat(),
-                "expected_close": (candle["timestamp"] + timedelta(seconds=interval_seconds)).isoformat(),
+                "expected_open": format_kenya_iso(candle["timestamp"]),
+                "expected_close": format_kenya_iso(
+                    candle["timestamp"] + timedelta(seconds=interval_seconds)
+                ),
             }
             for candle in candles
         ]
@@ -1608,46 +1612,51 @@ async def historical_ohlc_with_forming(
                                 pass
                         break
             
-            # Query all prices in the current bucket from database
-            bucket_prices = await postgres_service.query_history(
-                pair=normalized_pair,
-                start=bucket_time,
-                end=bucket_end_time,
-                limit=10000,
-                descending=False,  # ASC order to get open first
-            )
-            
-            if bucket_prices:
+            if current_price is not None:
+                last_close = (
+                    float(formatted_candles[-1]["close"])
+                    if formatted_candles
+                    else current_price
+                )
+                forming_candle = {
+                    "timestamp": format_kenya_iso(bucket_time),
+                    "open": last_close,
+                    "high": max(last_close, current_price),
+                    "low": min(last_close, current_price),
+                    "close": current_price,
+                    "volume": 1,
+                    "is_forming": True,
+                    "expected_open": format_kenya_iso(bucket_time),
+                    "expected_close": format_kenya_iso(bucket_end_time),
+                    "progress_percent": round(progress_percent, 2),
+                    "time_remaining_seconds": round(interval_seconds - time_in_bucket, 2),
+                }
+            else:
+                # Query bucket ticks only when snapshot price is unavailable
+                bucket_prices = await postgres_service.query_history(
+                    pair=normalized_pair,
+                    start=bucket_time,
+                    end=bucket_end_time,
+                    limit=500,
+                    descending=False,
+                )
+
+            if not forming_candle and bucket_prices:
                 # Calculate OHLC from all prices in bucket
                 prices = [float(p.price) for p in bucket_prices]
                 # Use current price for close if available, otherwise use last bucket price
                 close_price = current_price if current_price is not None else prices[-1]
                 
                 forming_candle = {
-                    "timestamp": bucket_time.isoformat(),
+                    "timestamp": format_kenya_iso(bucket_time),
                     "open": prices[0],
                     "high": max(prices + [close_price]) if current_price is not None else max(prices),
                     "low": min(prices + [close_price]) if current_price is not None else min(prices),
                     "close": close_price,
                     "volume": len(prices),
                     "is_forming": True,
-                    "expected_open": bucket_time.isoformat(),
-                    "expected_close": bucket_end_time.isoformat(),
-                    "progress_percent": round(progress_percent, 2),
-                    "time_remaining_seconds": round(interval_seconds - time_in_bucket, 2),
-                }
-            elif current_price is not None:
-                # Fallback to latest snapshot if no bucket data
-                forming_candle = {
-                    "timestamp": bucket_time.isoformat(),
-                    "open": current_price,
-                    "high": current_price,
-                    "low": current_price,
-                    "close": current_price,
-                    "volume": 1,
-                    "is_forming": True,
-                    "expected_open": bucket_time.isoformat(),
-                    "expected_close": bucket_end_time.isoformat(),
+                    "expected_open": format_kenya_iso(bucket_time),
+                    "expected_close": format_kenya_iso(bucket_end_time),
                     "progress_percent": round(progress_percent, 2),
                     "time_remaining_seconds": round(interval_seconds - time_in_bucket, 2),
                 }
@@ -1663,11 +1672,11 @@ async def historical_ohlc_with_forming(
         return JSONResponse({
             "pair": pair,
             "interval": interval,
-            "start": start_dt.isoformat() if start_dt else None,
-            "end": end_dt.isoformat() if end_dt else None,
+            "start": format_kenya_iso(start_dt) if start_dt else None,
+            "end": format_kenya_iso(end_dt) if end_dt else None,
             "closed_candles_count": len(formatted_candles),
             "has_forming_candle": forming_candle is not None,
-            "last_update": latest_data.get("ts", datetime.now(timezone.utc).isoformat()),
+            "last_update": format_kenya_iso(latest_data.get("ts")) or now_kenya_iso(),
             "candles": all_candles,
         })
     except ValueError as e:

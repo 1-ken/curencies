@@ -25,3 +25,10 @@ class LoginRequest(BaseModel):
 class AuthUserResponse(BaseModel):
     user_id: str
     username: str
+
+
+class GoogleSyncRequest(BaseModel):
+    google_sub: str = Field(..., min_length=1, max_length=128)
+    email: str | None = None
+    display_name: str | None = None
+    avatar_url: str | None = None

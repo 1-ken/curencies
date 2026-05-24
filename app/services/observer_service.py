@@ -9,6 +9,8 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
+from app.utils.kenya_time import format_kenya_display, now_kenya_iso
+
 from playwright.async_api import (
     async_playwright,
     Browser,
@@ -1146,7 +1148,7 @@ class SiteObserver:
                 "pairs": selected_pairs,
                 "pairsSample": texts[:10],
                 "changes": changes,
-                "ts": datetime.now().isoformat(),
+                "ts": now_kenya_iso(),
             }
 
 

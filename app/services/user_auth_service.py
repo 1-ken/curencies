@@ -48,6 +48,7 @@ class UserAuthService:
             user_id=user_id,
             username=normalized_username,
             password_hash=hash_password(password),
+            auth_provider="credentials",
             created_at=datetime.now(timezone.utc),
         )
 
@@ -65,7 +66,7 @@ class UserAuthService:
     async def authenticate(self, username: str, password: str) -> Tuple[str, str]:
         normalized_username = self.validate_username(username)
         user = await self._get_user_by_username(normalized_username)
-        if user is None or not verify_password(password, user.password_hash):
+        if user is None or not user.password_hash or not verify_password(password, user.password_hash):
             raise ValueError("Invalid username or password")
         return user.user_id, user.username
 

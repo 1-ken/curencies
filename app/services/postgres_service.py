@@ -5,13 +5,26 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, func, select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.engine.url import make_url
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from app.db.migrations import run_pending_sql_migrations
-from app.models import AlertRecord, Base, CallUsageLog, HistoricalPrice, StreamMetric, User, UserState
+from app.models import (
+    AlertRecord,
+    Base,
+    CallUsageLog,
+    HistoricalPrice,
+    OhlcCandle,
+    StreamMetric,
+    User,
+    UserActivityLog,
+    UserFavorite,
+    UserState,
+)
+from app.utils.kenya_time import format_kenya_iso, now_kenya_iso
 from app.utils.pair_normalizer import (
     PROVIDER_SUFFIXES,
     canonical_pair,
@@ -149,7 +162,61 @@ class PostgresService:
         async with self._sessionmaker() as session:
             session.add_all(rows)
             await session.commit()
+
+        await self._upsert_ohlc_from_ticks(rows)
         return len(rows)
+
+    async def _upsert_ohlc_from_ticks(self, rows: List[HistoricalPrice]) -> None:
+        """Upsert 1m OHLC buckets for pairs affected by new tick rows."""
+        if not rows or not self._sessionmaker:
+            return
+
+        buckets: Dict[tuple[str, datetime], Dict[str, Any]] = {}
+        for row in rows:
+            observed_at = row.observed_at
+            if observed_at.tzinfo is None:
+                observed_at = observed_at.replace(tzinfo=timezone.utc)
+            epoch = int(observed_at.timestamp())
+            bucket_epoch = (epoch // 60) * 60
+            bucket_time = datetime.fromtimestamp(bucket_epoch, tz=timezone.utc)
+            key = (row.pair, bucket_time)
+            entry = buckets.get(key)
+            price = float(row.price)
+            if entry is None:
+                buckets[key] = {
+                    "pair": row.pair,
+                    "interval": "1m",
+                    "bucket_time": bucket_time,
+                    "open": price,
+                    "high": price,
+                    "low": price,
+                    "close": price,
+                    "volume": 1,
+                }
+            else:
+                entry["high"] = max(entry["high"], price)
+                entry["low"] = min(entry["low"], price)
+                entry["close"] = price
+                entry["volume"] += 1
+
+        if not buckets:
+            return
+
+        async with self._sessionmaker() as session:
+            for entry in buckets.values():
+                stmt = pg_insert(OhlcCandle).values(**entry)
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=["pair", "interval", "bucket_time"],
+                    set_={
+                        "open": stmt.excluded.open,
+                        "high": stmt.excluded.high,
+                        "low": stmt.excluded.low,
+                        "close": stmt.excluded.close,
+                        "volume": stmt.excluded.volume,
+                    },
+                )
+                await session.execute(stmt)
+            await session.commit()
 
     async def query_history(
         self,
@@ -380,7 +447,6 @@ class PostgresService:
         if not self._sessionmaker:
             raise RuntimeError("PostgreSQL session not initialized")
 
-        # Map interval to seconds for epoch-based bucketing
         interval_map = {
             "1m": 60,
             "5m": 300,
@@ -390,13 +456,22 @@ class PostgresService:
             "4h": 14400,
             "1d": 86400,
         }
-        
+
         if interval not in interval_map:
             raise ValueError(f"Invalid interval: {interval}. Must be one of {list(interval_map.keys())}")
-        
-        interval_seconds = interval_map[interval]
 
         pair_variants = self._pair_variants(pair)
+        cached = await self._query_ohlc_from_table(
+            pair_variants=pair_variants,
+            interval=interval,
+            start=start,
+            end=end,
+            limit=limit,
+        )
+        if cached:
+            return cached
+
+        interval_seconds = interval_map[interval]
 
         # Build SQL query for OHLC aggregation using epoch-based bucketing
         # This correctly handles multi-minute intervals like 5m, 15m, 30m
@@ -431,8 +506,8 @@ class PostgresService:
         async with self._sessionmaker() as session:
             result = await session.execute(query, params)
             rows = result.fetchall()
-            
-            return [
+
+            candles = [
                 {
                     "timestamp": row[0],
                     "open": float(row[1]) if row[1] is not None else None,
@@ -443,6 +518,436 @@ class PostgresService:
                 }
                 for row in rows
             ]
+
+        await self._cache_ohlc_rows(pair_variants[0] if pair_variants else pair, interval, candles)
+        return candles
+
+    async def _query_ohlc_from_table(
+        self,
+        pair_variants: List[str],
+        interval: str,
+        start: Optional[datetime],
+        end: Optional[datetime],
+        limit: int,
+    ) -> List[Dict[str, Any]]:
+        if not self._sessionmaker:
+            return []
+
+        stmt = select(OhlcCandle).where(
+            OhlcCandle.pair.in_(pair_variants),
+            OhlcCandle.interval == interval,
+        )
+        if start:
+            stmt = stmt.where(OhlcCandle.bucket_time >= start)
+        if end:
+            stmt = stmt.where(OhlcCandle.bucket_time <= end)
+        stmt = stmt.order_by(OhlcCandle.bucket_time.desc()).limit(limit)
+
+        async with self._sessionmaker() as session:
+            result = await session.execute(stmt)
+            rows = list(result.scalars().all())
+
+        rows.sort(key=lambda row: row.bucket_time)
+        return [
+            {
+                "timestamp": row.bucket_time,
+                "open": float(row.open),
+                "high": float(row.high),
+                "low": float(row.low),
+                "close": float(row.close),
+                "volume": int(row.volume),
+            }
+            for row in rows
+        ]
+
+    async def _cache_ohlc_rows(
+        self,
+        pair: str,
+        interval: str,
+        candles: List[Dict[str, Any]],
+    ) -> None:
+        if not candles or not self._sessionmaker:
+            return
+
+        normalized_pair = self._normalize_pair(pair) or pair
+        async with self._sessionmaker() as session:
+            for candle in candles:
+                bucket_time = candle.get("timestamp")
+                if not isinstance(bucket_time, datetime):
+                    continue
+                stmt = pg_insert(OhlcCandle).values(
+                    pair=normalized_pair,
+                    interval=interval,
+                    bucket_time=bucket_time,
+                    open=float(candle["open"]),
+                    high=float(candle["high"]),
+                    low=float(candle["low"]),
+                    close=float(candle["close"]),
+                    volume=int(candle.get("volume") or 0),
+                )
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=["pair", "interval", "bucket_time"],
+                    set_={
+                        "open": stmt.excluded.open,
+                        "high": stmt.excluded.high,
+                        "low": stmt.excluded.low,
+                        "close": stmt.excluded.close,
+                        "volume": stmt.excluded.volume,
+                    },
+                )
+                await session.execute(stmt)
+            await session.commit()
+
+    async def list_user_favorites(self, user_id: str) -> List[str]:
+        if not self._sessionmaker:
+            raise RuntimeError("PostgreSQL session not initialized")
+
+        async with self._sessionmaker() as session:
+            stmt = (
+                select(UserFavorite.pair)
+                .where(UserFavorite.user_id == user_id)
+                .order_by(UserFavorite.created_at.desc())
+            )
+            result = await session.execute(stmt)
+            return [row[0] for row in result.all()]
+
+    async def add_user_favorite(self, user_id: str, pair: str) -> None:
+        if not self._sessionmaker:
+            raise RuntimeError("PostgreSQL session not initialized")
+
+        normalized_pair = self._normalize_pair(pair) or pair.upper()
+        async with self._sessionmaker() as session:
+            stmt = pg_insert(UserFavorite).values(
+                user_id=user_id,
+                pair=normalized_pair,
+                created_at=datetime.now(timezone.utc),
+            )
+            stmt = stmt.on_conflict_do_nothing(index_elements=["user_id", "pair"])
+            await session.execute(stmt)
+            await session.commit()
+
+    async def remove_user_favorite(self, user_id: str, pair: str) -> bool:
+        if not self._sessionmaker:
+            raise RuntimeError("PostgreSQL session not initialized")
+
+        normalized_pair = self._normalize_pair(pair) or pair.upper()
+        async with self._sessionmaker() as session:
+            result = await session.execute(
+                delete(UserFavorite).where(
+                    UserFavorite.user_id == user_id,
+                    UserFavorite.pair == normalized_pair,
+                )
+            )
+            await session.commit()
+            return (result.rowcount or 0) > 0
+
+    async def upsert_google_user(
+        self,
+        *,
+        user_id: str,
+        google_sub: str,
+        email: str | None,
+        display_name: str | None,
+        avatar_url: str | None,
+    ) -> str:
+        if not self._sessionmaker:
+            raise RuntimeError("PostgreSQL session not initialized")
+
+        username_base = (email or google_sub or user_id).split("@")[0][:24]
+        username = re.sub(r"[^a-z0-9_.]", "", username_base.lower()) or f"user_{google_sub[:8]}"
+
+        async with self._sessionmaker() as session:
+            existing = await session.execute(select(User).where(User.google_sub == google_sub))
+            user = existing.scalar_one_or_none()
+            if user is None:
+                existing_by_id = await session.execute(select(User).where(User.user_id == user_id))
+                user = existing_by_id.scalar_one_or_none()
+
+            if user is None:
+                candidate = username
+                suffix = 1
+                while True:
+                    taken = await session.execute(select(User).where(User.username == candidate))
+                    if taken.scalar_one_or_none() is None:
+                        break
+                    candidate = f"{username}_{suffix}"
+                    suffix += 1
+
+                user = User(
+                    user_id=user_id,
+                    username=candidate,
+                    password_hash=None,
+                    auth_provider="google",
+                    email=email,
+                    display_name=display_name,
+                    avatar_url=avatar_url,
+                    google_sub=google_sub,
+                    created_at=datetime.now(timezone.utc),
+                )
+                session.add(user)
+            else:
+                user.email = email or user.email
+                user.display_name = display_name or user.display_name
+                user.avatar_url = avatar_url or user.avatar_url
+                user.google_sub = google_sub
+                user.auth_provider = "google"
+
+            await session.commit()
+            await self.get_or_create_user_state(user.user_id)
+            return user.user_id
+
+    async def get_admin_metrics_overview(self) -> Dict[str, Any]:
+        if not self._sessionmaker:
+            raise RuntimeError("PostgreSQL session not initialized")
+
+        async with self._sessionmaker() as session:
+            users_count = await session.scalar(select(func.count()).select_from(User))
+            active_alerts = await session.scalar(
+                select(func.count()).select_from(AlertRecord).where(AlertRecord.status == "active")
+            )
+            triggered_alerts = await session.scalar(
+                select(func.count()).select_from(AlertRecord).where(AlertRecord.status == "triggered")
+            )
+            favorites_count = await session.scalar(select(func.count()).select_from(UserFavorite))
+
+        return {
+            "users_count": int(users_count or 0),
+            "active_alerts": int(active_alerts or 0),
+            "triggered_alerts": int(triggered_alerts or 0),
+            "favorites_count": int(favorites_count or 0),
+        }
+
+    async def list_users_for_admin(self, limit: int = 50) -> List[Dict[str, Any]]:
+        if not self._sessionmaker:
+            raise RuntimeError("PostgreSQL session not initialized")
+
+        async with self._sessionmaker() as session:
+            result = await session.execute(
+                select(User).order_by(User.created_at.desc()).limit(limit)
+            )
+            users = list(result.scalars().all())
+
+        items: List[Dict[str, Any]] = []
+        for user in users:
+            async with self._sessionmaker() as session:
+                alert_count = await session.scalar(
+                    select(func.count())
+                    .select_from(AlertRecord)
+                    .where(AlertRecord.user_id == user.user_id)
+                )
+            items.append(
+                {
+                    "user_id": user.user_id,
+                    "username": user.username,
+                    "email": user.email,
+                    "auth_provider": user.auth_provider,
+                    "created_at": format_kenya_iso(user.created_at),
+                    "alert_count": int(alert_count or 0),
+                }
+            )
+        return items
+
+    async def insert_activity_log(
+        self,
+        *,
+        id: str,
+        user_id: str | None,
+        event_type: str,
+        ip_address: str | None,
+        user_agent: str | None,
+        metadata: dict[str, Any],
+        created_at: datetime,
+    ) -> None:
+        if not self._sessionmaker:
+            return
+
+        async with self._sessionmaker() as session:
+            session.add(
+                UserActivityLog(
+                    id=uuid.UUID(id),
+                    user_id=user_id,
+                    event_type=event_type,
+                    ip_address=ip_address,
+                    user_agent=user_agent,
+                    metadata_json=metadata,
+                    created_at=created_at,
+                )
+            )
+            await session.commit()
+
+    async def list_activity_logs(
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        event_type: str | None = None,
+        user_id: str | None = None,
+    ) -> List[Dict[str, Any]]:
+        if not self._sessionmaker:
+            raise RuntimeError("PostgreSQL session not initialized")
+
+        async with self._sessionmaker() as session:
+            query = (
+                select(UserActivityLog, User.username, User.email)
+                .outerjoin(User, User.user_id == UserActivityLog.user_id)
+                .order_by(UserActivityLog.created_at.desc())
+            )
+            if event_type:
+                query = query.where(UserActivityLog.event_type == event_type)
+            if user_id:
+                query = query.where(UserActivityLog.user_id == user_id)
+            result = await session.execute(query.offset(offset).limit(limit))
+            rows = result.all()
+
+        items: List[Dict[str, Any]] = []
+        for row, username, email in rows:
+            metadata = row.metadata_json if isinstance(row.metadata_json, dict) else {}
+            username_from_metadata = metadata.get("username")
+            if isinstance(username_from_metadata, str):
+                username_from_metadata = username_from_metadata.strip() or None
+            else:
+                username_from_metadata = None
+
+            created_by = username or username_from_metadata or email
+            if not created_by and row.user_id:
+                created_by = row.user_id
+            if not created_by:
+                created_by = "Unknown"
+
+            items.append(
+                {
+                    "id": str(row.id),
+                    "user_id": row.user_id,
+                    "username": username or username_from_metadata,
+                    "email": email,
+                    "created_by": created_by,
+                    "event_type": row.event_type,
+                    "ip_address": row.ip_address,
+                    "user_agent": row.user_agent,
+                    "metadata": metadata,
+                    "created_at": format_kenya_iso(row.created_at),
+                }
+            )
+        return items
+
+    async def get_admin_metrics_extended(self) -> Dict[str, Any]:
+        overview = await self.get_admin_metrics_overview()
+        if not self._sessionmaker:
+            return overview
+
+        week_ago = datetime.now(timezone.utc) - timedelta(days=7)
+
+        async with self._sessionmaker() as session:
+            new_users_7d = await session.scalar(
+                select(func.count()).select_from(User).where(User.created_at >= week_ago)
+            )
+            channel_rows = await session.execute(
+                select(AlertRecord.channel, func.count())
+                .group_by(AlertRecord.channel)
+            )
+            status_rows = await session.execute(
+                select(AlertRecord.status, func.count())
+                .group_by(AlertRecord.status)
+            )
+            recent_activity = await session.scalar(
+                select(func.count())
+                .select_from(UserActivityLog)
+                .where(UserActivityLog.created_at >= week_ago)
+            )
+
+        return {
+            **overview,
+            "new_users_7d": int(new_users_7d or 0),
+            "recent_activity_7d": int(recent_activity or 0),
+            "alerts_by_channel": {row[0]: int(row[1]) for row in channel_rows},
+            "alerts_by_status": {row[0]: int(row[1]) for row in status_rows},
+        }
+
+    async def list_alerts_for_admin(
+        self,
+        *,
+        status: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        if not self._sessionmaker:
+            raise RuntimeError("PostgreSQL session not initialized")
+
+        async with self._sessionmaker() as session:
+            query = (
+                select(AlertRecord, User.username, User.email)
+                .outerjoin(User, User.user_id == AlertRecord.user_id)
+                .order_by(AlertRecord.created_at.desc())
+            )
+            if status:
+                query = query.where(AlertRecord.status == status)
+            result = await session.execute(query.offset(offset).limit(limit))
+            rows = result.all()
+
+        items: List[Dict[str, Any]] = []
+        for alert, username, email in rows:
+            created_by = username or email
+            if not created_by and alert.user_id and alert.user_id != "legacy-unassigned":
+                created_by = alert.user_id
+
+            items.append(
+                {
+                    "id": alert.id,
+                    "user_id": alert.user_id,
+                    "username": username,
+                    "email": email,
+                    "created_by": created_by or "Unknown",
+                    "pair": alert.pair,
+                    "channel": alert.channel,
+                    "status": alert.status,
+                    "alert_type": alert.alert_type,
+                    "target_price": alert.target_price,
+                    "threshold": alert.threshold,
+                    "condition": alert.condition,
+                    "created_at": format_kenya_iso(alert.created_at),
+                    "triggered_at": format_kenya_iso(alert.triggered_at)
+                    if alert.triggered_at
+                    else None,
+                }
+            )
+        return items
+
+    async def get_user_detail_for_admin(self, user_id: str) -> Dict[str, Any] | None:
+        if not self._sessionmaker:
+            raise RuntimeError("PostgreSQL session not initialized")
+
+        async with self._sessionmaker() as session:
+            result = await session.execute(select(User).where(User.user_id == user_id))
+            user = result.scalar_one_or_none()
+            if user is None:
+                return None
+
+            active_alerts = await session.scalar(
+                select(func.count())
+                .select_from(AlertRecord)
+                .where(AlertRecord.user_id == user_id, AlertRecord.status == "active")
+            )
+            triggered_alerts = await session.scalar(
+                select(func.count())
+                .select_from(AlertRecord)
+                .where(AlertRecord.user_id == user_id, AlertRecord.status == "triggered")
+            )
+            favorites_count = await session.scalar(
+                select(func.count())
+                .select_from(UserFavorite)
+                .where(UserFavorite.user_id == user_id)
+            )
+
+        return {
+            "user_id": user.user_id,
+            "username": user.username,
+            "email": user.email,
+            "auth_provider": user.auth_provider,
+            "created_at": format_kenya_iso(user.created_at),
+            "active_alerts": int(active_alerts or 0),
+            "triggered_alerts": int(triggered_alerts or 0),
+            "favorites_count": int(favorites_count or 0),
+        }
 
     async def get_latest_closed_candle(
         self,
